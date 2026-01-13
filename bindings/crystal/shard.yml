@@ -1,0 +1,14 @@
+name: pftrace
+version: 0.1.0
+
+authors:
+  - Bob
+
+description: |
+  Crystal bindings for libpftrace (Perfetto tracing).
+
+targets:
+  pftrace:
+    main: src/pftrace.cr
+
+license: MIT
