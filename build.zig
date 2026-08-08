@@ -160,6 +160,25 @@ pub fn build(b: *std.Build) void {
         examples_step.dependOn(&b.addRunArtifact(example).step);
     }
 
+    const perfetto_fixture_generator = b.addExecutable(.{
+        .name = "pftrace-perfetto-fixtures",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    perfetto_fixture_generator.root_module.addCSourceFiles(.{
+        .files = &.{"tests/fixtures/generate.c"},
+        .flags = &.{ "-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+    });
+    perfetto_fixture_generator.root_module.addIncludePath(b.path("include"));
+    perfetto_fixture_generator.root_module.linkLibrary(lib);
+    const perfetto_test = b.addSystemCommand(&.{ "sh", "tests/perfetto/run.sh" });
+    perfetto_test.addFileArg(perfetto_fixture_generator.getEmittedBin());
+    const perfetto_step = b.step("test-perfetto", "Run pinned Perfetto trace-processor compatibility suite");
+    perfetto_step.dependOn(&perfetto_test.step);
+
     const test_step = b.step("test", "Run all unit and public ABI tests");
     test_step.dependOn(zig_tests_step);
     test_step.dependOn(c_abi_step);

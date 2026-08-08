@@ -93,3 +93,19 @@ not synchronize clocks across processes or machines.
 ## License
 
 [MIT](LICENSE). Copyright (c) 2026 yampug.
+
+## Perfetto compatibility suite
+
+`zig build test-perfetto` generates deterministic direct and builder fixtures,
+then queries them with Perfetto trace processor SQL. It needs release **v57.2**
+`trace_processor_shell`; set `PERFETTO_TRACE_PROCESSOR` to its executable when
+it is not on `PATH`. Missing or wrong-version tools fail clearly, rather than
+silently skipping compatibility tests.
+
+Pin source: [Perfetto v57.2 release](https://github.com/google/perfetto/releases/tag/v57.2).
+Recorded release-archive SHA-256 values: Linux amd64
+`a5354a4a133cc629bb398da53c95515e5a49d4bd96edfebe1ebc3221c85d936f`; macOS
+arm64 `f0f282ef199a2942ee5286856cd57260b11e93f95fdd80e3ffafe2f56ed936de`.
+To update: download target release archive, verify its SHA-256, extract
+`trace_processor_shell`, update version/checksum here and `tests/perfetto/run.sh`,
+then run `zig build test-perfetto`.
