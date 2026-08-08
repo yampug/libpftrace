@@ -8,6 +8,10 @@ pub fn build(b: *std.Build) void {
     const check_package_step = b.step("check-package", "Verify package files and manifest metadata");
     check_package_step.dependOn(&package_check.step);
 
+    const documentation_check = b.addSystemCommand(&.{ "sh", "tools/check-docs.sh" });
+    const documentation_step = b.step("test-docs", "Compile README C snippets and check public API inventory");
+    documentation_step.dependOn(&documentation_check.step);
+
     // Create the root module
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -275,4 +279,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(cpp_abi_step);
     test_step.dependOn(examples_step);
     test_step.dependOn(abi_step);
+    test_step.dependOn(documentation_step);
 }

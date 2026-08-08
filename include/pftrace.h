@@ -13,6 +13,11 @@ typedef struct pftrace_writer_t pftrace_writer_t;
 typedef struct pftrace_packet_t pftrace_packet_t;
 typedef struct pftrace_track_event_t pftrace_track_event_t;
 
+/* Stable status values. INVALID_ARGUMENT, INVALID_STATE, CAPACITY_EXCEEDED,
+ * and MESSAGE_TOO_LARGE reject only current operation; caller may correct it
+ * and continue. IO_ERROR is terminal and sticky: later mutations return it
+ * without another sink call. DISABLED is reserved for a configured disabled
+ * writer. Use pftrace_status_string for allocation-free diagnostic text. */
 typedef enum {
   PFTRACE_OK = 0, PFTRACE_INVALID_ARGUMENT = 1, PFTRACE_INVALID_STATE = 2,
   PFTRACE_CAPACITY_EXCEEDED = 3, PFTRACE_MESSAGE_TOO_LARGE = 4,
@@ -20,7 +25,9 @@ typedef enum {
 } pftrace_status_t;
 
 /* Return PFTRACE_OK only after consuming all `size` bytes. `context` and the
- * callback remain caller-owned; a non-OK return becomes sticky IO_ERROR. */
+ * callback remain caller-owned for writer lifetime; a non-OK return becomes
+ * sticky IO_ERROR. Callback invocation, explicit flush, and finalize can
+ * block in caller-supplied or OS I/O. */
 typedef pftrace_status_t (*pftrace_write_fn)(void *context,
                                               const uint8_t *bytes,
                                               size_t size);
@@ -37,7 +44,9 @@ typedef struct { const char *data; size_t size; } pftrace_string_t;
  * `struct_size` permits a newer library to accept an older caller's prefix;
  * fields beyond it retain their documented defaults. Memory reserved during
  * initialization is fixed writer bookkeeping plus packet_scratch_capacity +
- * output_batch_capacity. */
+ * output_batch_capacity. Initialization is only allocation point; direct
+ * events, descriptors, clocks, builder operations, flush, and finalize do
+ * not allocate after successful initialization. */
 typedef struct {
   uint32_t struct_size;
   uint32_t version;
@@ -174,15 +183,18 @@ pftrace_status_t pftrace_init_path_with_options(
 /* fd is borrowed: libpftrace neither reopens nor closes it. */
 pftrace_status_t pftrace_init_fd_with_options(
     int fd, const pftrace_writer_options_t *options, pftrace_writer_t **out_writer);
-/* Callback receives each complete committed output span in order. */
+/* Callback receives each complete committed output span in order. It must
+ * consume whole span before returning PFTRACE_OK; partial success is not
+ * representable. Context remains caller-owned for writer lifetime. */
 pftrace_status_t pftrace_init_callback_with_options(
     pftrace_write_fn write_fn, void *context, const pftrace_writer_options_t *options,
     pftrace_writer_t **out_writer);
 pftrace_writer_t *pftrace_init_string(pftrace_string_t file_path);
 pftrace_writer_t *pftrace_init(const char *file_path);
 pftrace_status_t pftrace_destroy(pftrace_writer_t *writer);
-/* Flushes every complete packet currently buffered. Empty/repeated successful
- * flushes are no-ops. A successful flush leaves writer usable. */
+/* Flushes every complete packet currently buffered. This may call the sink and
+ * block. Empty/repeated successful flushes are no-ops. A successful flush
+ * leaves writer usable. */
 pftrace_status_t pftrace_flush(pftrace_writer_t *writer);
 pftrace_status_t pftrace_finalize(pftrace_writer_t *writer);
 

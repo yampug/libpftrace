@@ -48,6 +48,12 @@ Every C status is checked by the high-level API. Failures raise
 `Pftrace.open` performs both in that order. Event wrappers are invalidated when
 their block ends and raise `PFTRACE_INVALID_STATE` if reused.
 
+`Trace` is single-writer: use one Crystal thread/fiber execution context at a
+time for a writer and do not retain an event outside its block. `finalize` and
+`close` reject active C builder construction. A finalized writer cannot accept
+new mutations. `PFTRACE_IO_ERROR` from a sink is terminal and sticky; other
+status failures are recoverable after caller corrects input or capacity.
+
 For bounded writers, initialize options before changing them:
 
 ```crystal
@@ -61,11 +67,31 @@ Pftrace.open("trace.pftrace", options) do |trace|
 end
 ```
 
-`LibPftrace` mirrors public status, string, options, callback-sink, direct-event,
-argument, clock, and lifecycle ABI types. C calls borrow Crystal strings and
-direct-event arrays only for their synchronous duration; do not retain such
-pointers in callbacks after the call returns. Callback contexts remain owned by
-the Crystal caller for the writer lifetime.
+Defaults reserve 1 MiB each for packet scratch/output batch/max packet/max
+string, 1024 each for arguments/categories/flow kinds, depth 64, unlimited
+trace bytes, and batch by default. `maximum_packet_bytes` must fit both buffers.
+Writer initialization allocates bookkeeping and those two configured buffers;
+normal direct events, descriptors, clocks, builder calls, flush, and finalize
+do not allocate. Complete packets batch until full or `flush_each_packet`;
+automatic flushes, `Trace#flush`, and `Trace#finalize` can block in sink I/O.
+Use application-owned drain scheduling when isolation is required.
+
+Crystal `Trace#trace` uses status-aware builder API. For lowest-overhead common
+events, construct `LibPftrace::Event` and call `LibPftrace.write_event`, then
+pass result through `Pftrace.check!`; the C call borrows event and array memory
+only synchronously. Strings may contain embedded NUL bytes through
+`LibPftrace::String`; NUL C wrappers are bounded to 1 MiB plus terminator.
+
+Path initialization owns/closes path file. FD initialization borrows descriptor.
+Callback function/context stay caller-owned for writer lifetime and must report
+success only after consuming full buffer. Clock timestamps are nanoseconds;
+clock ID 6 is Linux `CLOCK_BOOTTIME` only, while application clock IDs begin at
+`LibPftrace::CLOCK_ID_CUSTOM_FIRST` (64). libpftrace does not synchronize clocks.
+
+Migration: old pointer-only `pftrace_init` has no error result; use options-aware
+constructors. C/C++ must check every mutation status; Crystal high-level methods
+already raise `Pftrace::Error`. Prefer direct events where their data model fits,
+otherwise use `Trace#trace` and let its block close event before packet commit.
 
 Run binding specs after building root static library:
 
