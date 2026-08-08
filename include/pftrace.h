@@ -115,7 +115,7 @@ typedef struct {
  * `data == NULL` is valid only with size zero. Empty byte strings are valid;
  * length-bearing inputs may contain embedded NUL bytes. Legacy `const char *`
  * wrappers scan at most 1 MiB plus its terminator and reject unterminated input.
- * Invalid enums are PFTRACE_INVALID_ARGUMENT. No array-taking APIs exist yet. */
+ * Invalid enums are PFTRACE_INVALID_ARGUMENT. */
 const char *pftrace_status_string(pftrace_status_t status);
 pftrace_status_t pftrace_writer_status(const pftrace_writer_t *writer);
 
@@ -159,6 +159,13 @@ pftrace_status_t pftrace_destroy(pftrace_writer_t *writer);
  * flushes are no-ops. A successful flush leaves writer usable. */
 pftrace_status_t pftrace_flush(pftrace_writer_t *writer);
 pftrace_status_t pftrace_finalize(pftrace_writer_t *writer);
+
+/* Encodes one complete TracePacket/TrackEvent transaction from `event`. It
+ * borrows every input only for this call, performs no allocation after writer
+ * initialization, and either commits a complete packet or leaves the output
+ * batch unchanged. */
+pftrace_status_t pftrace_write_event(pftrace_writer_t *writer,
+                                     const pftrace_event_t *event);
 
 pftrace_packet_t *pftrace_packet_begin(pftrace_writer_t *writer);
 pftrace_status_t pftrace_packet_end(pftrace_writer_t *writer, pftrace_packet_t *packet);

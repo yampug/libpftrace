@@ -419,6 +419,62 @@ fn validateDirectEvent(writer: *const pftrace_writer_t, event: ?*const pftrace_e
     return .ok;
 }
 
+/// Encodes direct-event fields in same protobuf representation used by legacy
+/// builder helpers. Callers must validate every borrowed span before this runs.
+fn encodeDirectEvent(pb: *proto.PbWriter, event: *const pftrace_event_t) proto.Error!void {
+    const packet = try pb.beginNested(1);
+    try pb.writeInt(schema.TracePacket.TIMESTAMP, event.timestamp_ns);
+    if (event.timestamp_clock_id != 0) try pb.writeInt(schema.TracePacket.TIMESTAMP_CLOCK_ID, event.timestamp_clock_id);
+    if (event.trusted_packet_sequence_id != 0) try pb.writeInt(schema.TracePacket.TRUSTED_PACKET_SEQUENCE_ID, event.trusted_packet_sequence_id);
+
+    const track_event = try pb.beginNested(schema.TracePacket.TRACK_EVENT);
+    try pb.writeInt(schema.TrackEvent.TYPE, @intFromEnum(event.type));
+    try pb.writeInt(schema.TrackEvent.TRACK_UUID, event.track_uuid);
+    try pb.writeString(schema.TrackEvent.NAME, stringSlice(event.name).?);
+    if (event.type == .counter) try pb.writeSignedInt64(schema.TrackEvent.COUNTER_VALUE, event.counter_value);
+
+    if (event.category_count != 0) {
+        for (event.categories.?[0..event.category_count]) |category| {
+            try pb.writeString(schema.TrackEvent.CATEGORIES, stringSlice(category).?);
+        }
+    }
+    if (event.flow_id_count != 0) {
+        for (event.flow_ids.?[0..event.flow_id_count]) |flow_id| {
+            try pb.writeInt(schema.TrackEvent.FLOW_IDS, flow_id);
+        }
+    }
+    if (event.terminating_flow_id_count != 0) {
+        for (event.terminating_flow_ids.?[0..event.terminating_flow_id_count]) |flow_id| {
+            try pb.writeInt(schema.TrackEvent.TERMINATING_FLOW_IDS, flow_id);
+        }
+    }
+    if (event.argument_count != 0) {
+        for (event.arguments.?[0..event.argument_count]) |argument| {
+            const value: AnnotationValue = switch (argument.type) {
+                .string => .{ .string = stringSlice(argument.value.string_value).? },
+                .int64 => .{ .int = argument.value.int64_value },
+                .uint64 => .{ .uint = argument.value.uint64_value },
+                .double => .{ .double = argument.value.double_value },
+                .bool => .{ .boolean = argument.value.bool_value },
+                .pointer => .{ .uint = argument.value.pointer_value },
+                else => unreachable,
+            };
+            const field: u32 = switch (argument.type) {
+                .string => schema.DebugAnnotation.STRING_VALUE,
+                .int64 => schema.DebugAnnotation.INT_VALUE,
+                .uint64 => schema.DebugAnnotation.UINT_VALUE,
+                .double => schema.DebugAnnotation.DOUBLE_VALUE,
+                .bool => schema.DebugAnnotation.BOOL_VALUE,
+                .pointer => schema.DebugAnnotation.POINTER_VALUE,
+                else => unreachable,
+            };
+            try encodeAnnotation(pb, stringSlice(argument.key).?, field, value);
+        }
+    }
+    try pb.endNested(track_event);
+    try pb.endNested(packet);
+}
+
 fn cString(ptr: ?[*]const u8) ?[]const u8 {
     const data = ptr orelse return null;
     var len: usize = 0;
@@ -541,6 +597,24 @@ export fn pftrace_finalize(writer: ?*pftrace_writer_t) pftrace_status_t {
     if (w.terminal_status != .ok) return w.terminal_status;
     if (w.active_packet.active or w.active_event.active) return .invalid_state;
     return w.finalize();
+}
+
+export fn pftrace_write_event(writer: ?*pftrace_writer_t, event: ?*const pftrace_event_t) pftrace_status_t {
+    const w = writer orelse return .invalid_argument;
+    if (w.terminal_status != .ok) return w.terminal_status;
+    if (w.finalized or w.active_packet.active or w.active_event.active) return .invalid_state;
+    const validation_status = validateDirectEvent(w, event);
+    if (validation_status != .ok) return validation_status;
+
+    w.packet_pb.reset();
+    const encoding_status = mutationStatus(w, encodeDirectEvent(&w.packet_pb, event.?));
+    if (encoding_status != .ok) {
+        w.packet_pb.reset();
+        return encoding_status;
+    }
+    const commit_status = w.commitPacket(w.packet_pb.written());
+    w.packet_pb.reset();
+    return commit_status;
 }
 
 export fn pftrace_packet_begin(writer: ?*pftrace_writer_t) ?*pftrace_packet_t {
@@ -1006,4 +1080,133 @@ test "direct event validation rejects invalid input before scratch mutation" {
     event.argument_count = 1;
     try std.testing.expectEqual(pftrace_status_t.invalid_argument, validateDirectEvent(&writer, &event));
     try std.testing.expectEqualSlices(u8, prefix, writer.packet_pb.written());
+}
+
+test "direct event encodes same complete packet as builder" {
+    var direct_output: [4096]u8 = undefined;
+    var direct_scratch: [4096]u8 = undefined;
+    var direct_writer = testWriter(&direct_output, &direct_scratch);
+    var builder_output: [4096]u8 = undefined;
+    var builder_scratch: [4096]u8 = undefined;
+    var builder_writer = testWriter(&builder_output, &builder_scratch);
+
+    const categories = [_]pftrace_string_t{
+        .{ .data = "one".ptr, .size = 3 },
+        .{ .data = "two".ptr, .size = 3 },
+    };
+    const flow_ids = [_]u64{ 3, 4 };
+    const terminating_flow_ids = [_]u64{5};
+    const arguments = [_]pftrace_arg_t{
+        .{ .key = .{ .data = "text".ptr, .size = 4 }, .type = .string, .value = .{ .string_value = .{ .data = "value".ptr, .size = 5 } } },
+        .{ .key = .{ .data = "int".ptr, .size = 3 }, .type = .int64, .value = .{ .int64_value = -1 } },
+        .{ .key = .{ .data = "uint".ptr, .size = 4 }, .type = .uint64, .value = .{ .uint64_value = 7 } },
+        .{ .key = .{ .data = "double".ptr, .size = 6 }, .type = .double, .value = .{ .double_value = 1.5 } },
+        .{ .key = .{ .data = "bool".ptr, .size = 4 }, .type = .bool, .value = .{ .bool_value = true } },
+        .{ .key = .{ .data = "ptr".ptr, .size = 3 }, .type = .pointer, .value = .{ .pointer_value = 0x1234 } },
+    };
+    const direct_event = pftrace_event_t{
+        .timestamp_ns = 12,
+        .timestamp_clock_id = 0,
+        .trusted_packet_sequence_id = 2,
+        .track_uuid = 9,
+        .type = .counter,
+        .name = .{ .data = "event".ptr, .size = 5 },
+        .counter_value = -7,
+        .flow_ids = &flow_ids,
+        .flow_id_count = flow_ids.len,
+        .terminating_flow_ids = &terminating_flow_ids,
+        .terminating_flow_id_count = terminating_flow_ids.len,
+        .categories = &categories,
+        .category_count = categories.len,
+        .arguments = &arguments,
+        .argument_count = arguments.len,
+    };
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_event(&direct_writer, &direct_event));
+
+    const packet = pftrace_packet_begin(&builder_writer).?;
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_packet_set_timestamp(packet, direct_event.timestamp_ns));
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_packet_set_trusted_packet_sequence_id(packet, direct_event.trusted_packet_sequence_id));
+    const event = pftrace_packet_begin_track_event(packet).?;
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_set_type(event, @intFromEnum(direct_event.type)));
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_set_track_uuid(event, direct_event.track_uuid));
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_set_name_string(event, direct_event.name));
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_set_counter_value(event, direct_event.counter_value));
+    for (categories) |category| try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_category_string(event, category));
+    for (flow_ids) |flow_id| try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_flow_id(event, flow_id));
+    for (terminating_flow_ids) |flow_id| try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_terminating_flow_id(event, flow_id));
+    for (arguments) |argument| switch (argument.type) {
+        .string => try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_arg_string_string(event, argument.key, argument.value.string_value)),
+        .int64 => try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_arg_int_string(event, argument.key, argument.value.int64_value)),
+        .uint64 => try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_arg_uint_string(event, argument.key, argument.value.uint64_value)),
+        .double => try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_arg_double_string(event, argument.key, argument.value.double_value)),
+        .bool => try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_arg_bool_string(event, argument.key, argument.value.bool_value)),
+        .pointer => try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_add_arg_ptr_string(event, argument.key, argument.value.pointer_value)),
+        else => unreachable,
+    };
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_track_event_end(event));
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_packet_commit(packet));
+    try std.testing.expectEqualSlices(u8, builder_writer.pb.written(), direct_writer.pb.written());
+}
+
+test "direct event fault failures preserve batch and recover" {
+    const direct_event = pftrace_event_t{
+        .timestamp_ns = 1,
+        .timestamp_clock_id = 0,
+        .trusted_packet_sequence_id = 0,
+        .track_uuid = 2,
+        .type = .instant,
+        .name = .{ .data = "event".ptr, .size = 5 },
+        .counter_value = 0,
+        .flow_ids = null,
+        .flow_id_count = 0,
+        .terminating_flow_ids = null,
+        .terminating_flow_id_count = 0,
+        .categories = null,
+        .category_count = 0,
+        .arguments = null,
+        .argument_count = 0,
+    };
+    var count_output: [128]u8 = undefined;
+    var count_scratch: [128]u8 = undefined;
+    var count_writer = testWriter(&count_output, &count_scratch);
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_event(&count_writer, &direct_event));
+    const append_count = count_writer.packet_pb.appendAttemptCount();
+
+    for (1..append_count + 1) |failure_point| {
+        var output: [128]u8 = undefined;
+        var scratch: [128]u8 = undefined;
+        var writer = testWriter(&output, &scratch);
+        try writer.pb.writeVarint(7);
+        var prefix: [1]u8 = undefined;
+        @memcpy(&prefix, writer.pb.written());
+        writer.packet_pb.setAppendFailurePoint(failure_point);
+        try std.testing.expectEqual(pftrace_status_t.capacity_exceeded, pftrace_write_event(&writer, &direct_event));
+        try std.testing.expectEqualSlices(u8, &prefix, writer.pb.written());
+        try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_event(&writer, &direct_event));
+    }
+}
+
+test "direct event writes caller selected timestamp clock id" {
+    var output: [128]u8 = undefined;
+    var scratch: [128]u8 = undefined;
+    var writer = testWriter(&output, &scratch);
+    const event = pftrace_event_t{
+        .timestamp_ns = 1,
+        .timestamp_clock_id = 7,
+        .trusted_packet_sequence_id = 0,
+        .track_uuid = 2,
+        .type = .instant,
+        .name = .{ .data = "event".ptr, .size = 5 },
+        .counter_value = 0,
+        .flow_ids = null,
+        .flow_id_count = 0,
+        .terminating_flow_ids = null,
+        .terminating_flow_id_count = 0,
+        .categories = null,
+        .category_count = 0,
+        .arguments = null,
+        .argument_count = 0,
+    };
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_event(&writer, &event));
+    try std.testing.expect(std.mem.indexOf(u8, writer.pb.written(), &.{ 0xd0, 0x03, 0x07 }) != null);
 }

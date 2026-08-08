@@ -162,6 +162,7 @@ int main(void) {
   if (pftrace_init_callback_with_options(capture_write, &memory, NULL,
                                          &callback_writer) != PFTRACE_OK ||
       callback_writer == NULL ||
+      pftrace_write_event(callback_writer, &direct_event) != PFTRACE_OK ||
       pftrace_write_clock_snapshot(callback_writer, UINT64_C(42)) != PFTRACE_OK ||
       pftrace_write_clock_snapshot(callback_writer, UINT64_C(43)) != PFTRACE_OK ||
       memory.calls != 0 || pftrace_flush(callback_writer) != PFTRACE_OK ||
