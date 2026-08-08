@@ -50,16 +50,16 @@ int main() {
     pftrace_packet_t* p = pftrace_packet_begin(w);
     pftrace_packet_set_timestamp(p, 1000000500);
     pftrace_packet_set_timestamp_clock_id(p, PFTRACE_CLOCK_ID_LINUX_BOOTTIME);
-    
+
     pftrace_track_event_t* te = pftrace_packet_begin_track_event(p);
     pftrace_track_event_set_type(te, PFTRACE_TRACK_EVENT_TYPE_SLICE_BEGIN);
     pftrace_track_event_set_track_uuid(te, 101);
     pftrace_track_event_set_name(te, "DoWork");
-    
+
     // Arguments
     pftrace_track_event_add_arg_string(te, "user_id", "u-123");
     pftrace_track_event_add_arg_int(te, "payload_size", 4096);
-    
+
     // Flows
     pftrace_track_event_add_flow_id(te, 99);
 
@@ -92,20 +92,4 @@ not synchronize clocks across processes or machines.
 
 ## License
 
-[MIT](LICENSE). Copyright (c) 2026 yampug.
-
-## Perfetto compatibility suite
-
-`zig build test-perfetto` generates deterministic direct and builder fixtures,
-then queries them with Perfetto trace processor SQL. It needs release **v57.2**
-`trace_processor_shell`; set `PERFETTO_TRACE_PROCESSOR` to its executable when
-it is not on `PATH`. Missing or wrong-version tools fail clearly, rather than
-silently skipping compatibility tests.
-
-Pin source: [Perfetto v57.2 release](https://github.com/google/perfetto/releases/tag/v57.2).
-Recorded release-archive SHA-256 values: Linux amd64
-`a5354a4a133cc629bb398da53c95515e5a49d4bd96edfebe1ebc3221c85d936f`; macOS
-arm64 `f0f282ef199a2942ee5286856cd57260b11e93f95fdd80e3ffafe2f56ed936de`.
-To update: download target release archive, verify its SHA-256, extract
-`trace_processor_shell`, update version/checksum here and `tests/perfetto/run.sh`,
-then run `zig build test-perfetto`.
+[MIT](LICENSE). Copyright (c) 2026 rx-bob.

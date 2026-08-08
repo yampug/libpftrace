@@ -13,6 +13,7 @@ test_big_trace
 # Documentation (Whitelist strategy)
 *.md
 !README.md
+!CHANGELOG.md
 !LICENSE.md
 
 .zig-cache/
