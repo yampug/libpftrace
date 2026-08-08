@@ -2,6 +2,24 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+struct callback_state {
+  size_t calls;
+  size_t bytes;
+  pftrace_status_t result;
+};
+
+static pftrace_status_t capture_write(void *context, const uint8_t *bytes,
+                                      size_t size) {
+  struct callback_state *const state = context;
+  if (bytes == NULL || size == 0) {
+    return PFTRACE_INVALID_ARGUMENT;
+  }
+  ++state->calls;
+  state->bytes += size;
+  return state->result;
+}
 
 int main(void) {
   _Static_assert(PFTRACE_OK == 0 && PFTRACE_INVALID_ARGUMENT == 1 &&
@@ -48,7 +66,7 @@ int main(void) {
   options.maximum_packet_bytes = 128;
   pftrace_writer_t *custom_writer = NULL;
   const char *const custom_path = "pftrace-custom-options.pftrace";
-  if (pftrace_init_with_options(custom_path, &options, &custom_writer) != PFTRACE_OK ||
+  if (pftrace_init_path_with_options(custom_path, &options, &custom_writer) != PFTRACE_OK ||
       custom_writer == NULL || pftrace_destroy(custom_writer) != PFTRACE_OK ||
       remove(custom_path) != 0) {
     return 1;
@@ -104,6 +122,46 @@ int main(void) {
   }
   if (pftrace_destroy(writer) != PFTRACE_OK) {
     (void)remove(path);
+    return 1;
+  }
+
+  struct callback_state memory = {0, 0, PFTRACE_OK};
+  pftrace_writer_t *callback_writer = NULL;
+  if (pftrace_init_callback_with_options(NULL, NULL, NULL, &callback_writer) !=
+          PFTRACE_INVALID_ARGUMENT ||
+      callback_writer != NULL ||
+      pftrace_init_fd_with_options(-1, NULL, &callback_writer) !=
+          PFTRACE_INVALID_ARGUMENT ||
+      callback_writer != NULL) {
+    return 1;
+  }
+  if (pftrace_init_callback_with_options(capture_write, &memory, NULL,
+                                         &callback_writer) != PFTRACE_OK ||
+      callback_writer == NULL ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(42)) != PFTRACE_OK ||
+      memory.calls != 1 || memory.bytes == 0 ||
+      pftrace_destroy(callback_writer) != PFTRACE_OK) {
+    return 1;
+  }
+
+  struct callback_state failing = {0, 0, PFTRACE_INVALID_ARGUMENT};
+  callback_writer = NULL;
+  if (pftrace_init_callback_with_options(capture_write, &failing, NULL,
+                                         &callback_writer) != PFTRACE_OK ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(1)) != PFTRACE_IO_ERROR ||
+      failing.calls != 1 || pftrace_writer_status(callback_writer) != PFTRACE_IO_ERROR ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(2)) != PFTRACE_IO_ERROR ||
+      failing.calls != 1 || pftrace_destroy(callback_writer) != PFTRACE_IO_ERROR) {
+    return 1;
+  }
+
+  FILE *const borrowed = tmpfile();
+  callback_writer = NULL;
+  if (borrowed == NULL ||
+      pftrace_init_fd_with_options(fileno(borrowed), NULL, &callback_writer) != PFTRACE_OK ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(3)) != PFTRACE_OK ||
+      pftrace_destroy(callback_writer) != PFTRACE_OK ||
+      fputs("still-open", borrowed) < 0 || fclose(borrowed) != 0) {
     return 1;
   }
 

@@ -19,6 +19,12 @@ typedef enum {
   PFTRACE_IO_ERROR = 5, PFTRACE_DISABLED = 6,
 } pftrace_status_t;
 
+/* Return PFTRACE_OK only after consuming all `size` bytes. `context` and the
+ * callback remain caller-owned; a non-OK return becomes sticky IO_ERROR. */
+typedef pftrace_status_t (*pftrace_write_fn)(void *context,
+                                              const uint8_t *bytes,
+                                              size_t size);
+
 typedef struct { const char *data; size_t size; } pftrace_string_t;
 
 /* Version 1 options. Defaults: 1 MiB packet scratch/output batch/maximum
@@ -73,6 +79,20 @@ pftrace_status_t pftrace_init_string_with_options(
     pftrace_writer_t **out_writer);
 pftrace_status_t pftrace_init_with_options(
     const char *file_path, const pftrace_writer_options_t *options,
+    pftrace_writer_t **out_writer);
+/* Explicit path constructors. Path writers own and close their file. */
+pftrace_status_t pftrace_init_path_string_with_options(
+    pftrace_string_t file_path, const pftrace_writer_options_t *options,
+    pftrace_writer_t **out_writer);
+pftrace_status_t pftrace_init_path_with_options(
+    const char *file_path, const pftrace_writer_options_t *options,
+    pftrace_writer_t **out_writer);
+/* fd is borrowed: libpftrace neither reopens nor closes it. */
+pftrace_status_t pftrace_init_fd_with_options(
+    int fd, const pftrace_writer_options_t *options, pftrace_writer_t **out_writer);
+/* Callback receives each complete committed output span in order. */
+pftrace_status_t pftrace_init_callback_with_options(
+    pftrace_write_fn write_fn, void *context, const pftrace_writer_options_t *options,
     pftrace_writer_t **out_writer);
 pftrace_writer_t *pftrace_init_string(pftrace_string_t file_path);
 pftrace_writer_t *pftrace_init(const char *file_path);

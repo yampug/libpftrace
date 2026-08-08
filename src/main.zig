@@ -1,6 +1,7 @@
 const std = @import("std");
 const proto = @import("proto.zig");
 const schema = @import("schema.zig");
+const sink = @import("sink.zig");
 
 const allocator = std.heap.page_allocator;
 const default_packet_capacity = 1024 * 1024;
@@ -21,6 +22,7 @@ pub const pftrace_status_t = enum(c_int) {
 };
 
 pub const pftrace_string_t = extern struct { data: ?[*]const u8, size: usize };
+pub const pftrace_write_fn = *const fn (?*anyopaque, ?[*]const u8, usize) callconv(.c) c_int;
 
 pub const pftrace_writer_options_t = extern struct {
     struct_size: u32,
@@ -89,7 +91,7 @@ pub const pftrace_writer_t = struct {
     pb_storage: []u8,
     packet_pb: proto.PbWriter,
     packet_storage: []u8,
-    file: std.Io.File,
+    sink: sink.Sink,
     io_threaded: std.Io.Threaded,
     options: WriterOptions,
     terminal_status: pftrace_status_t = .ok,
@@ -99,7 +101,7 @@ pub const pftrace_writer_t = struct {
     event_generation: u64 = 0,
     next_source_iid: u64 = 1,
 
-    pub fn init(path: []const u8, options: WriterOptions) !*pftrace_writer_t {
+    fn initBase(options: WriterOptions) !*pftrace_writer_t {
         const ptr = try allocator.create(pftrace_writer_t);
         errdefer allocator.destroy(ptr);
         ptr.pb_storage = try allocator.alloc(u8, options.output_batch_capacity);
@@ -113,24 +115,40 @@ pub const pftrace_writer_t = struct {
         ptr.active_packet.active = false;
         ptr.active_event.active = false;
         ptr.io_threaded = std.Io.Threaded.init(allocator, .{});
-        errdefer ptr.io_threaded.deinit();
-        ptr.file = try std.Io.Dir.createFile(.cwd(), ptr.io_threaded.io(), path, .{});
         return ptr;
     }
 
-    pub fn deinit(self: *pftrace_writer_t) void {
-        _ = self.flush();
-        self.file.close(self.io_threaded.io());
+    pub fn initPath(path: []const u8, options: WriterOptions) !*pftrace_writer_t {
+        const ptr = try initBase(options);
+        errdefer ptr.deinitWithoutSink();
+        ptr.sink = .{ .owned_file = try std.Io.Dir.createFile(.cwd(), ptr.io_threaded.io(), path, .{}) };
+        return ptr;
+    }
+
+    pub fn initWithSink(value: sink.Sink, options: WriterOptions) !*pftrace_writer_t {
+        const ptr = try initBase(options);
+        ptr.sink = value;
+        return ptr;
+    }
+
+    fn deinitWithoutSink(self: *pftrace_writer_t) void {
         self.io_threaded.deinit();
         allocator.free(self.pb_storage);
         allocator.free(self.packet_storage);
         allocator.destroy(self);
     }
 
+    pub fn deinit(self: *pftrace_writer_t) pftrace_status_t {
+        const status = self.flush();
+        self.sink.deinit(self.io_threaded.io());
+        self.deinitWithoutSink();
+        return status;
+    }
+
     pub fn flush(self: *pftrace_writer_t) pftrace_status_t {
         if (self.terminal_status != .ok) return self.terminal_status;
         if (self.pb.written().len == 0) return .ok;
-        self.file.writeStreamingAll(self.io_threaded.io(), self.pb.written()) catch {
+        self.sink.writeAll(self.io_threaded.io(), self.pb.written()) catch {
             self.terminal_status = .io_error;
             return .io_error;
         };
@@ -336,22 +354,45 @@ export fn pftrace_writer_options_init(options: ?*pftrace_writer_options_t) pftra
     return .ok;
 }
 
-export fn pftrace_init_string_with_options(path_value: pftrace_string_t, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
+export fn pftrace_init_path_string_with_options(path_value: pftrace_string_t, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
     const output = out_writer orelse return .invalid_argument;
     output.* = null;
     const path = stringSlice(path_value) orelse return .invalid_argument;
     if (path.len == 0) return .invalid_argument;
     const options = optionsFromC(option_value) catch return .invalid_argument;
-    output.* = pftrace_writer_t.init(path, options) catch return .io_error;
+    output.* = pftrace_writer_t.initPath(path, options) catch return .io_error;
     return .ok;
 }
+export fn pftrace_init_path_with_options(path_ptr: ?[*]const u8, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
+    return pftrace_init_path_string_with_options(stringArg(path_ptr) orelse return .invalid_argument, option_value, out_writer);
+}
+/// Legacy path constructor retained for source compatibility.
+export fn pftrace_init_string_with_options(path_value: pftrace_string_t, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
+    return pftrace_init_path_string_with_options(path_value, option_value, out_writer);
+}
 export fn pftrace_init_with_options(path_ptr: ?[*]const u8, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
-    return pftrace_init_string_with_options(stringArg(path_ptr) orelse return .invalid_argument, option_value, out_writer);
+    return pftrace_init_path_with_options(path_ptr, option_value, out_writer);
+}
+export fn pftrace_init_fd_with_options(fd: c_int, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
+    const output = out_writer orelse return .invalid_argument;
+    output.* = null;
+    const options = optionsFromC(option_value) catch return .invalid_argument;
+    const value = sink.Sink.borrowedFd(fd) orelse return .invalid_argument;
+    output.* = pftrace_writer_t.initWithSink(value, options) catch return .io_error;
+    return .ok;
+}
+export fn pftrace_init_callback_with_options(write_fn: ?pftrace_write_fn, context: ?*anyopaque, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
+    const output = out_writer orelse return .invalid_argument;
+    output.* = null;
+    const callback = write_fn orelse return .invalid_argument;
+    const options = optionsFromC(option_value) catch return .invalid_argument;
+    output.* = pftrace_writer_t.initWithSink(.{ .callback = .{ .write = callback, .context = context } }, options) catch return .io_error;
+    return .ok;
 }
 
 export fn pftrace_init_string(path_value: pftrace_string_t) ?*pftrace_writer_t {
     var writer: ?*pftrace_writer_t = null;
-    return if (pftrace_init_string_with_options(path_value, null, &writer) == .ok) writer else null;
+    return if (pftrace_init_path_string_with_options(path_value, null, &writer) == .ok) writer else null;
 }
 export fn pftrace_init(path_ptr: ?[*]const u8) ?*pftrace_writer_t {
     return pftrace_init_string(stringArg(path_ptr) orelse return null);
@@ -359,9 +400,7 @@ export fn pftrace_init(path_ptr: ?[*]const u8) ?*pftrace_writer_t {
 export fn pftrace_destroy(writer: ?*pftrace_writer_t) pftrace_status_t {
     const w = writer orelse return .invalid_argument;
     if (w.active_packet.active or w.active_event.active) return .invalid_state;
-    const status = w.terminal_status;
-    w.deinit();
-    return status;
+    return w.deinit();
 }
 export fn pftrace_flush(writer: ?*pftrace_writer_t) pftrace_status_t {
     return if (writer) |w| w.flush() else .invalid_argument;
@@ -434,6 +473,7 @@ export fn pftrace_packet_set_trusted_packet_sequence_id(packet: ?*pftrace_packet
 }
 
 fn descriptorProcess(writer: *pftrace_writer_t, uuid: u64, pid: i32, name: []const u8) pftrace_status_t {
+    if (writer.terminal_status != .ok) return writer.terminal_status;
     if (name.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
     const checkpoint = writer.pb.checkpoint();
     const result = encodeProcess(writer, uuid, pid, name);
@@ -454,6 +494,7 @@ export fn pftrace_write_process_track_descriptor(writer: ?*pftrace_writer_t, uui
 }
 
 fn descriptorThread(writer: *pftrace_writer_t, uuid: u64, parent_uuid: u64, pid: i32, tid: i32, name: []const u8) pftrace_status_t {
+    if (writer.terminal_status != .ok) return writer.terminal_status;
     if (name.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
     const checkpoint = writer.pb.checkpoint();
     const result = encodeThread(writer, uuid, parent_uuid, pid, tid, name);
@@ -475,6 +516,7 @@ export fn pftrace_write_thread_track_descriptor(writer: ?*pftrace_writer_t, uuid
 
 export fn pftrace_write_clock_snapshot(writer: ?*pftrace_writer_t, boottime_ns: u64) pftrace_status_t {
     const w = writer orelse return .invalid_argument;
+    if (w.terminal_status != .ok) return w.terminal_status;
     const checkpoint = w.pb.checkpoint();
     const result = encodeClockSnapshot(w, boottime_ns);
     const status = mutationStatus(w, result);
@@ -675,7 +717,7 @@ fn testWriter(output: []u8, scratch: []u8) pftrace_writer_t {
         .pb_storage = output,
         .packet_pb = proto.PbWriter.init(scratch),
         .packet_storage = scratch,
-        .file = undefined,
+        .sink = undefined,
         .io_threaded = undefined,
         .options = defaultOptions(),
         .active_packet = .{ .active = false },
