@@ -1,0 +1,15 @@
+io/github/libpftrace/PftraceNative$Holder.class
+io/github/libpftrace/PftraceNative$EventCommon.class
+io/github/libpftrace/Status.class
+io/github/libpftrace/WriterOptions.class
+io/github/libpftrace/PftraceNative$ArgValue.class
+io/github/libpftrace/PftraceNative$DirectEvent.class
+io/github/libpftrace/PftraceException.class
+io/github/libpftrace/Trace.class
+io/github/libpftrace/PftraceNative.class
+io/github/libpftrace/PftraceNative$Arg.class
+io/github/libpftrace/PftraceNative$NativeString.class
+io/github/libpftrace/EventType.class
+io/github/libpftrace/PftraceNative$WriteCallback.class
+io/github/libpftrace/Pftrace.class
+io/github/libpftrace/Event.class

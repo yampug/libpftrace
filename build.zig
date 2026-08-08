@@ -31,8 +31,15 @@ pub fn build(b: *std.Build) void {
         .root_module = lib_mod,
     });
 
-    // Install the static library (zig-out/lib/libpftrace.a)
+    // Install both the static archive and shared library.  The shared library
+    // is consumed by FFI bindings such as bindings/java.
     b.installArtifact(lib);
+    const shared_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "pftrace",
+        .root_module = lib_mod,
+    });
+    b.installArtifact(shared_lib);
 
     // Install the public header (zig-out/include/pftrace.h)
     b.installFile("include/pftrace.h", "include/pftrace.h");
