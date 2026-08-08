@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const package_check = b.addSystemCommand(&.{ "sh", "tools/check-package.sh" });
+    const check_package_step = b.step("check-package", "Verify package files and manifest metadata");
+    check_package_step.dependOn(&package_check.step);
+
     // Create the root module
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -24,4 +28,7 @@ pub fn build(b: *std.Build) void {
 
     // Install the public header (zig-out/include/pftrace.h)
     b.installFile("include/pftrace.h", "include/pftrace.h");
+
+    // Keep redistribution terms alongside installed library artifacts.
+    b.installFile("LICENSE", "LICENSE");
 }

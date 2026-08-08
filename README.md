@@ -22,7 +22,10 @@ A high-performance, **zero-dependency** Zig library that implements a high-level
 
 ### Building
 
-Requirements: [Zig](https://ziglang.org/) 0.15+ (or latest master).
+Requirements: [Zig](https://ziglang.org/) 0.15.0.
+
+Newer Zig releases are supported only after CI passes for that release. The
+current development head is not an implicit supported version.
 
 ```bash
 zig build
@@ -73,4 +76,4 @@ Check the `examples/` directory for full test programs.
 
 ## License
 
-MIT
+[MIT](LICENSE). Copyright (c) 2026 yampug.
