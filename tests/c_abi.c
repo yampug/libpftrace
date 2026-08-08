@@ -1,6 +1,7 @@
 #include "pftrace.h"
 
 #include <stdio.h>
+#include <string.h>
 
 int main(void) {
   _Static_assert(PFTRACE_OK == 0 && PFTRACE_INVALID_ARGUMENT == 1 &&
@@ -12,6 +13,44 @@ int main(void) {
   if (pftrace_status_string(PFTRACE_OK) == NULL ||
       pftrace_status_string((pftrace_status_t)99) == NULL ||
       pftrace_writer_status(NULL) != PFTRACE_INVALID_ARGUMENT) {
+    return 1;
+  }
+  pftrace_writer_options_t options;
+  if (pftrace_writer_options_init(&options) != PFTRACE_OK ||
+      options.struct_size != sizeof(options)) {
+    return 1;
+  }
+  const char *const invalid_path = "pftrace-invalid-options.pftrace";
+  FILE *const sentinel = fopen(invalid_path, "wb");
+  if (sentinel == NULL || fputs("keep", sentinel) < 0 || fclose(sentinel) != 0) {
+    return 1;
+  }
+  options.maximum_packet_bytes = options.output_batch_capacity + 1;
+  pftrace_writer_t *invalid_writer = (pftrace_writer_t *)(uintptr_t)1;
+  if (pftrace_init_with_options(invalid_path, &options, &invalid_writer) !=
+          PFTRACE_INVALID_ARGUMENT ||
+      invalid_writer != NULL) {
+    (void)remove(invalid_path);
+    return 1;
+  }
+  char retained[5] = {0};
+  FILE *const retained_file = fopen(invalid_path, "rb");
+  if (retained_file == NULL || fread(retained, 1, 4, retained_file) != 4 ||
+      fclose(retained_file) != 0 || strcmp(retained, "keep") != 0 ||
+      remove(invalid_path) != 0) {
+    return 1;
+  }
+  if (pftrace_writer_options_init(&options) != PFTRACE_OK) {
+    return 1;
+  }
+  options.packet_scratch_capacity = 128;
+  options.output_batch_capacity = 128;
+  options.maximum_packet_bytes = 128;
+  pftrace_writer_t *custom_writer = NULL;
+  const char *const custom_path = "pftrace-custom-options.pftrace";
+  if (pftrace_init_with_options(custom_path, &options, &custom_writer) != PFTRACE_OK ||
+      custom_writer == NULL || pftrace_destroy(custom_writer) != PFTRACE_OK ||
+      remove(custom_path) != 0) {
     return 1;
   }
   const char *const path = "pftrace-c-abi-test.pftrace";

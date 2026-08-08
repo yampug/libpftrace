@@ -44,6 +44,7 @@ pub const PbWriter = struct {
     buffer: []u8,
     cursor: usize = 0,
     max_message_size: u32,
+    max_nesting_depth: usize = max_nested_depth,
     frames: [max_nested_depth]Frame = undefined,
     frame_count: usize = 0,
     failure_injection: if (builtin.is_test) FailureInjection else void = if (builtin.is_test) .{} else {},
@@ -54,6 +55,14 @@ pub const PbWriter = struct {
 
     pub fn initWithMaxMessageSize(buffer: []u8, max_message_size: u32) PbWriter {
         return .{ .buffer = buffer, .max_message_size = max_message_size };
+    }
+
+    pub fn initWithLimits(buffer: []u8, max_message_size: u32, nesting_limit: usize) PbWriter {
+        return .{
+            .buffer = buffer,
+            .max_message_size = max_message_size,
+            .max_nesting_depth = nesting_limit,
+        };
     }
 
     /// Reset buffer for reuse without modifying caller-owned storage.
@@ -233,7 +242,7 @@ pub const PbWriter = struct {
 
     /// Begin a length-delimited child message. Five bytes permit every uint32 length.
     pub fn beginNested(self: *PbWriter, field_id: u32) Error!Bookmark {
-        if (self.frame_count == max_nested_depth) return error.InvalidBookmark;
+        if (self.frame_count == self.max_nesting_depth) return error.InvalidBookmark;
         const tag = (@as(u64, field_id) << 3) | @as(u64, @intFromEnum(WireType.LengthDelimited));
         const tag_len = varintLen(tag);
         try self.ensureCapacity(try checkedAdd(tag_len, length_varint_max_bytes));

@@ -22,6 +22,38 @@ pub const pftrace_status_t = enum(c_int) {
 
 pub const pftrace_string_t = extern struct { data: ?[*]const u8, size: usize };
 
+pub const pftrace_writer_options_t = extern struct {
+    struct_size: u32,
+    version: u32,
+    packet_scratch_capacity: usize,
+    output_batch_capacity: usize,
+    maximum_packet_bytes: usize,
+    maximum_trace_bytes: usize,
+    maximum_string_bytes: usize,
+    maximum_arguments: usize,
+    maximum_categories: usize,
+    maximum_flow_ids: usize,
+    maximum_terminating_flow_ids: usize,
+    maximum_nesting_depth: u32,
+    flush_each_packet: bool,
+};
+
+const WriterOptions = struct {
+    packet_scratch_capacity: usize = default_packet_capacity,
+    output_batch_capacity: usize = default_packet_capacity,
+    maximum_packet_bytes: usize = default_packet_capacity,
+    maximum_trace_bytes: usize = 0,
+    maximum_string_bytes: usize = max_c_string_scan,
+    maximum_arguments: usize = default_collection_limit,
+    maximum_categories: usize = default_collection_limit,
+    maximum_flow_ids: usize = default_collection_limit,
+    maximum_terminating_flow_ids: usize = default_collection_limit,
+    maximum_nesting_depth: usize = proto.max_nested_depth,
+    flush_each_packet: bool = false,
+};
+
+const writer_options_version: u32 = 1;
+
 const BuilderPhase = enum { idle, packet, event };
 
 /// Opaque, writer-owned builder slot. A pointer remains valid only until its
@@ -57,9 +89,9 @@ pub const pftrace_writer_t = struct {
     pb_storage: []u8,
     packet_pb: proto.PbWriter,
     packet_storage: []u8,
-    file_path: []u8,
     file: std.Io.File,
     io_threaded: std.Io.Threaded,
+    options: WriterOptions,
     terminal_status: pftrace_status_t = .ok,
     active_packet: pftrace_packet_t = undefined,
     active_event: pftrace_track_event_t = undefined,
@@ -67,21 +99,21 @@ pub const pftrace_writer_t = struct {
     event_generation: u64 = 0,
     next_source_iid: u64 = 1,
 
-    pub fn init(path: []const u8) !*pftrace_writer_t {
+    pub fn init(path: []const u8, options: WriterOptions) !*pftrace_writer_t {
         const ptr = try allocator.create(pftrace_writer_t);
         errdefer allocator.destroy(ptr);
-        ptr.pb_storage = try allocator.alloc(u8, default_packet_capacity);
+        ptr.pb_storage = try allocator.alloc(u8, options.output_batch_capacity);
         errdefer allocator.free(ptr.pb_storage);
-        ptr.pb = proto.PbWriter.init(ptr.pb_storage);
-        ptr.packet_storage = try allocator.alloc(u8, default_packet_capacity);
+        ptr.pb = proto.PbWriter.initWithLimits(ptr.pb_storage, @intCast(options.maximum_packet_bytes), options.maximum_nesting_depth);
+        ptr.packet_storage = try allocator.alloc(u8, options.packet_scratch_capacity);
         errdefer allocator.free(ptr.packet_storage);
-        ptr.packet_pb = proto.PbWriter.init(ptr.packet_storage);
+        ptr.packet_pb = proto.PbWriter.initWithLimits(ptr.packet_storage, @intCast(options.maximum_packet_bytes), options.maximum_nesting_depth);
+        ptr.options = options;
         ptr.terminal_status = .ok;
         ptr.active_packet.active = false;
         ptr.active_event.active = false;
-        ptr.file_path = try allocator.dupe(u8, path);
-        errdefer allocator.free(ptr.file_path);
         ptr.io_threaded = std.Io.Threaded.init(allocator, .{});
+        errdefer ptr.io_threaded.deinit();
         ptr.file = try std.Io.Dir.createFile(.cwd(), ptr.io_threaded.io(), path, .{});
         return ptr;
     }
@@ -90,7 +122,6 @@ pub const pftrace_writer_t = struct {
         _ = self.flush();
         self.file.close(self.io_threaded.io());
         self.io_threaded.deinit();
-        allocator.free(self.file_path);
         allocator.free(self.pb_storage);
         allocator.free(self.packet_storage);
         allocator.destroy(self);
@@ -114,6 +145,37 @@ fn mapError(err: proto.Error) pftrace_status_t {
         error.MessageTooLarge => .message_too_large,
         error.InvalidBookmark => .invalid_state,
     };
+}
+
+fn defaultOptions() WriterOptions {
+    return .{};
+}
+
+fn optionPresent(struct_size: u32, comptime field: []const u8) bool {
+    return struct_size >= @offsetOf(pftrace_writer_options_t, field) + @sizeOf(@FieldType(pftrace_writer_options_t, field));
+}
+
+fn optionsFromC(value: ?*const pftrace_writer_options_t) error{InvalidArgument}!WriterOptions {
+    const source = value orelse return defaultOptions();
+    if (!optionPresent(source.struct_size, "version") or source.version != writer_options_version) return error.InvalidArgument;
+    var options = defaultOptions();
+    if (optionPresent(source.struct_size, "packet_scratch_capacity")) options.packet_scratch_capacity = source.packet_scratch_capacity;
+    if (optionPresent(source.struct_size, "output_batch_capacity")) options.output_batch_capacity = source.output_batch_capacity;
+    if (optionPresent(source.struct_size, "maximum_packet_bytes")) options.maximum_packet_bytes = source.maximum_packet_bytes;
+    if (optionPresent(source.struct_size, "maximum_trace_bytes")) options.maximum_trace_bytes = source.maximum_trace_bytes;
+    if (optionPresent(source.struct_size, "maximum_string_bytes")) options.maximum_string_bytes = source.maximum_string_bytes;
+    if (optionPresent(source.struct_size, "maximum_arguments")) options.maximum_arguments = source.maximum_arguments;
+    if (optionPresent(source.struct_size, "maximum_categories")) options.maximum_categories = source.maximum_categories;
+    if (optionPresent(source.struct_size, "maximum_flow_ids")) options.maximum_flow_ids = source.maximum_flow_ids;
+    if (optionPresent(source.struct_size, "maximum_terminating_flow_ids")) options.maximum_terminating_flow_ids = source.maximum_terminating_flow_ids;
+    if (optionPresent(source.struct_size, "maximum_nesting_depth")) options.maximum_nesting_depth = source.maximum_nesting_depth;
+    if (optionPresent(source.struct_size, "flush_each_packet")) options.flush_each_packet = source.flush_each_packet;
+
+    if (options.packet_scratch_capacity == 0 or options.output_batch_capacity == 0 or options.maximum_packet_bytes == 0 or options.maximum_packet_bytes > options.packet_scratch_capacity or options.maximum_packet_bytes > options.output_batch_capacity or options.maximum_packet_bytes > std.math.maxInt(u32) or options.maximum_nesting_depth == 0 or options.maximum_nesting_depth > proto.max_nested_depth) return error.InvalidArgument;
+    _ = std.math.add(usize, @sizeOf(pftrace_writer_t), options.packet_scratch_capacity) catch return error.InvalidArgument;
+    _ = std.math.add(usize, @sizeOf(pftrace_writer_t), options.output_batch_capacity) catch return error.InvalidArgument;
+    _ = std.math.add(usize, options.packet_scratch_capacity, options.output_batch_capacity) catch return error.InvalidArgument;
+    return options;
 }
 
 fn mutationStatus(writer: *pftrace_writer_t, result: proto.Error!void) pftrace_status_t {
@@ -254,10 +316,42 @@ export fn pftrace_writer_status(writer: ?*const pftrace_writer_t) pftrace_status
     return if (writer) |w| w.terminal_status else .invalid_argument;
 }
 
+export fn pftrace_writer_options_init(options: ?*pftrace_writer_options_t) pftrace_status_t {
+    const value = options orelse return .invalid_argument;
+    value.* = .{
+        .struct_size = @sizeOf(pftrace_writer_options_t),
+        .version = writer_options_version,
+        .packet_scratch_capacity = default_packet_capacity,
+        .output_batch_capacity = default_packet_capacity,
+        .maximum_packet_bytes = default_packet_capacity,
+        .maximum_trace_bytes = 0,
+        .maximum_string_bytes = max_c_string_scan,
+        .maximum_arguments = default_collection_limit,
+        .maximum_categories = default_collection_limit,
+        .maximum_flow_ids = default_collection_limit,
+        .maximum_terminating_flow_ids = default_collection_limit,
+        .maximum_nesting_depth = proto.max_nested_depth,
+        .flush_each_packet = false,
+    };
+    return .ok;
+}
+
+export fn pftrace_init_string_with_options(path_value: pftrace_string_t, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
+    const output = out_writer orelse return .invalid_argument;
+    output.* = null;
+    const path = stringSlice(path_value) orelse return .invalid_argument;
+    if (path.len == 0) return .invalid_argument;
+    const options = optionsFromC(option_value) catch return .invalid_argument;
+    output.* = pftrace_writer_t.init(path, options) catch return .io_error;
+    return .ok;
+}
+export fn pftrace_init_with_options(path_ptr: ?[*]const u8, option_value: ?*const pftrace_writer_options_t, out_writer: ?*?*pftrace_writer_t) pftrace_status_t {
+    return pftrace_init_string_with_options(stringArg(path_ptr) orelse return .invalid_argument, option_value, out_writer);
+}
+
 export fn pftrace_init_string(path_value: pftrace_string_t) ?*pftrace_writer_t {
-    const path = stringSlice(path_value) orelse return null;
-    if (path.len == 0) return null;
-    return pftrace_writer_t.init(path) catch null;
+    var writer: ?*pftrace_writer_t = null;
+    return if (pftrace_init_string_with_options(path_value, null, &writer) == .ok) writer else null;
 }
 export fn pftrace_init(path_ptr: ?[*]const u8) ?*pftrace_writer_t {
     return pftrace_init_string(stringArg(path_ptr) orelse return null);
@@ -304,6 +398,12 @@ export fn pftrace_packet_end(writer: ?*pftrace_writer_t, packet: ?*pftrace_packe
         return close_status;
     }
     const output_checkpoint = w.pb.checkpoint();
+    if (w.packet_pb.written().len > w.options.maximum_packet_bytes) {
+        w.packet_pb.reset();
+        p.active = false;
+        p.phase = .idle;
+        return .message_too_large;
+    }
     const copy_status = mutationStatus(w, w.pb.appendEncoded(w.packet_pb.written()));
     if (copy_status != .ok) {
         w.pb.rollback(output_checkpoint) catch unreachable;
@@ -334,6 +434,7 @@ export fn pftrace_packet_set_trusted_packet_sequence_id(packet: ?*pftrace_packet
 }
 
 fn descriptorProcess(writer: *pftrace_writer_t, uuid: u64, pid: i32, name: []const u8) pftrace_status_t {
+    if (name.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
     const checkpoint = writer.pb.checkpoint();
     const result = encodeProcess(writer, uuid, pid, name);
     const status = mutationStatus(writer, result);
@@ -353,6 +454,7 @@ export fn pftrace_write_process_track_descriptor(writer: ?*pftrace_writer_t, uui
 }
 
 fn descriptorThread(writer: *pftrace_writer_t, uuid: u64, parent_uuid: u64, pid: i32, tid: i32, name: []const u8) pftrace_status_t {
+    if (name.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
     const checkpoint = writer.pb.checkpoint();
     const result = encodeThread(writer, uuid, parent_uuid, pid, tid, name);
     const status = mutationStatus(writer, result);
@@ -444,7 +546,7 @@ export fn pftrace_track_event_set_counter_value(event: ?*pftrace_track_event_t, 
 export fn pftrace_track_event_add_flow_id(event: ?*pftrace_track_event_t, flow_id: u64) pftrace_status_t {
     const e = eventValid(event) orelse return .invalid_state;
     if (e.writer.active_packet.first_error != .ok) return e.writer.active_packet.first_error;
-    if (e.flow_count >= default_collection_limit) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
+    if (e.flow_count >= e.writer.options.maximum_flow_ids) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
     const status = eventMutation(event, e.writer.packet_pb.writeInt(schema.TrackEvent.FLOW_IDS, flow_id));
     if (status == .ok) e.flow_count += 1;
     return status;
@@ -452,7 +554,7 @@ export fn pftrace_track_event_add_flow_id(event: ?*pftrace_track_event_t, flow_i
 export fn pftrace_track_event_add_terminating_flow_id(event: ?*pftrace_track_event_t, flow_id: u64) pftrace_status_t {
     const e = eventValid(event) orelse return .invalid_state;
     if (e.writer.active_packet.first_error != .ok) return e.writer.active_packet.first_error;
-    if (e.terminating_flow_count >= default_collection_limit) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
+    if (e.terminating_flow_count >= e.writer.options.maximum_terminating_flow_ids) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
     const status = eventMutation(event, e.writer.packet_pb.writeInt(schema.TrackEvent.TERMINATING_FLOW_IDS, flow_id));
     if (status == .ok) e.terminating_flow_count += 1;
     return status;
@@ -462,6 +564,7 @@ fn writeEventString(event: ?*pftrace_track_event_t, field: u32, value: pftrace_s
     const e = eventValid(event) orelse return .invalid_state;
     if (e.writer.active_packet.first_error != .ok) return e.writer.active_packet.first_error;
     const text = stringSlice(value) orelse return latchPacketError(&e.writer.active_packet, .invalid_argument);
+    if (text.len > e.writer.options.maximum_string_bytes) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
     return eventMutation(event, e.writer.packet_pb.writeString(field, text));
 }
 export fn pftrace_track_event_set_name_string(event: ?*pftrace_track_event_t, name: pftrace_string_t) pftrace_status_t {
@@ -472,7 +575,7 @@ export fn pftrace_track_event_set_name(event: ?*pftrace_track_event_t, name: ?[*
 }
 export fn pftrace_track_event_add_category_string(event: ?*pftrace_track_event_t, category: pftrace_string_t) pftrace_status_t {
     const e = eventValid(event) orelse return .invalid_state;
-    if (e.category_count >= default_collection_limit) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
+    if (e.category_count >= e.writer.options.maximum_categories) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
     const status = writeEventString(event, schema.TrackEvent.CATEGORIES, category);
     if (status == .ok) e.category_count += 1;
     return status;
@@ -485,14 +588,19 @@ fn annotation(event: ?*pftrace_track_event_t, key: pftrace_string_t, field: u32,
     const e = eventValid(event) orelse return .invalid_state;
     if (e.writer.active_packet.first_error != .ok) return e.writer.active_packet.first_error;
     const k = stringSlice(key) orelse return latchPacketError(&e.writer.active_packet, .invalid_argument);
+    if (k.len > e.writer.options.maximum_string_bytes) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
     const encoded: AnnotationValue = switch (value) {
-        .string => |v| .{ .string = stringSlice(v) orelse return latchPacketError(&e.writer.active_packet, .invalid_argument) },
+        .string => |v| blk: {
+            const text = stringSlice(v) orelse return latchPacketError(&e.writer.active_packet, .invalid_argument);
+            if (text.len > e.writer.options.maximum_string_bytes) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
+            break :blk .{ .string = text };
+        },
         .int => |v| .{ .int = v },
         .uint => |v| .{ .uint = v },
         .double => |v| .{ .double = v },
         .boolean => |v| .{ .boolean = v },
     };
-    if (field != schema.DebugAnnotation.STRING_VALUE and e.argument_count >= default_collection_limit) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
+    if (field != schema.DebugAnnotation.STRING_VALUE and e.argument_count >= e.writer.options.maximum_arguments) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
     const result = encodeAnnotation(&e.writer.packet_pb, k, field, encoded);
     const status = eventMutation(event, result);
     if (status == .ok and field != schema.DebugAnnotation.STRING_VALUE) e.argument_count += 1;
@@ -546,6 +654,7 @@ export fn pftrace_track_event_set_task_execution_string(event: ?*pftrace_track_e
     if (e.writer.active_packet.first_error != .ok) return e.writer.active_packet.first_error;
     const f = stringSlice(file) orelse return latchPacketError(&e.writer.active_packet, .invalid_argument);
     const fn_name = stringSlice(func) orelse return latchPacketError(&e.writer.active_packet, .invalid_argument);
+    if (f.len > e.writer.options.maximum_string_bytes or fn_name.len > e.writer.options.maximum_string_bytes) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
     if (e.task_metadata_assigned) return latchPacketError(&e.writer.active_packet, .invalid_state);
     const iid = e.writer.next_source_iid;
     if (iid == 0 or iid == std.math.maxInt(u64)) return latchPacketError(&e.writer.active_packet, .capacity_exceeded);
@@ -566,9 +675,9 @@ fn testWriter(output: []u8, scratch: []u8) pftrace_writer_t {
         .pb_storage = output,
         .packet_pb = proto.PbWriter.init(scratch),
         .packet_storage = scratch,
-        .file_path = undefined,
         .file = undefined,
         .io_threaded = undefined,
+        .options = defaultOptions(),
         .active_packet = .{ .active = false },
         .active_event = .{ .active = false },
     };
@@ -608,4 +717,25 @@ test "builder collection boundary latches packet error" {
     try std.testing.expectEqual(pftrace_status_t.capacity_exceeded, pftrace_track_event_end(event));
     try std.testing.expectEqual(pftrace_status_t.capacity_exceeded, pftrace_packet_end(&writer, packet));
     try std.testing.expectEqual(@as(usize, 0), writer.pb.written().len);
+}
+
+test "writer options accept older prefixes and reject contradictory values" {
+    var raw: pftrace_writer_options_t = undefined;
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_writer_options_init(&raw));
+    try std.testing.expectEqual(@as(u32, @sizeOf(pftrace_writer_options_t)), raw.struct_size);
+    try std.testing.expectEqual(@as(u32, writer_options_version), raw.version);
+
+    const prefix_size = @offsetOf(pftrace_writer_options_t, "packet_scratch_capacity");
+    raw.struct_size = prefix_size;
+    try std.testing.expectEqual(default_packet_capacity, (try optionsFromC(&raw)).packet_scratch_capacity);
+
+    raw.struct_size = @sizeOf(pftrace_writer_options_t);
+    raw.packet_scratch_capacity = 64;
+    raw.output_batch_capacity = 64;
+    raw.maximum_packet_bytes = 65;
+    try std.testing.expectError(error.InvalidArgument, optionsFromC(&raw));
+
+    raw.maximum_packet_bytes = 64;
+    raw.maximum_nesting_depth = proto.max_nested_depth + 1;
+    try std.testing.expectError(error.InvalidArgument, optionsFromC(&raw));
 }

@@ -21,6 +21,30 @@ typedef enum {
 
 typedef struct { const char *data; size_t size; } pftrace_string_t;
 
+/* Version 1 options. Defaults: 1 MiB packet scratch/output batch/maximum
+ * packet/string bytes; 1024 arguments, categories, and each flow kind; 64
+ * nested messages; unlimited trace bytes; and flush_each_packet false. Call
+ * pftrace_writer_options_init before changing fields.
+ * `struct_size` permits a newer library to accept an older caller's prefix;
+ * fields beyond it retain their documented defaults. Memory reserved during
+ * initialization is fixed writer bookkeeping plus packet_scratch_capacity +
+ * output_batch_capacity. */
+typedef struct {
+  uint32_t struct_size;
+  uint32_t version;
+  size_t packet_scratch_capacity;
+  size_t output_batch_capacity;
+  size_t maximum_packet_bytes;
+  size_t maximum_trace_bytes; /* 0 means no trace-byte limit. */
+  size_t maximum_string_bytes;
+  size_t maximum_arguments;
+  size_t maximum_categories;
+  size_t maximum_flow_ids;
+  size_t maximum_terminating_flow_ids;
+  uint32_t maximum_nesting_depth;
+  bool flush_each_packet;
+} pftrace_writer_options_t;
+
 typedef enum {
   PFTRACE_TRACK_EVENT_TYPE_UNSPECIFIED = 0, PFTRACE_TRACK_EVENT_TYPE_SLICE_BEGIN = 1,
   PFTRACE_TRACK_EVENT_TYPE_SLICE_END = 2, PFTRACE_TRACK_EVENT_TYPE_INSTANT = 3,
@@ -40,6 +64,16 @@ pftrace_status_t pftrace_writer_status(const pftrace_writer_t *writer);
  * must end before packet. Ended handles immediately become invalid. Retaining
  * an ended handle through a later reuse of writer's slot is outside C contract.
  * destroy rejects active construction and leaves writer usable. */
+/* Initializes `options` to stable version-1 defaults. */
+pftrace_status_t pftrace_writer_options_init(pftrace_writer_options_t *options);
+/* Validates options before creating or truncating file_path. On success stores
+ * a writer in out_writer; on failure out_writer is set to NULL. */
+pftrace_status_t pftrace_init_string_with_options(
+    pftrace_string_t file_path, const pftrace_writer_options_t *options,
+    pftrace_writer_t **out_writer);
+pftrace_status_t pftrace_init_with_options(
+    const char *file_path, const pftrace_writer_options_t *options,
+    pftrace_writer_t **out_writer);
 pftrace_writer_t *pftrace_init_string(pftrace_string_t file_path);
 pftrace_writer_t *pftrace_init(const char *file_path);
 pftrace_status_t pftrace_destroy(pftrace_writer_t *writer);
