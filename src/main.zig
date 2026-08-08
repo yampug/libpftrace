@@ -20,8 +20,34 @@ pub const pftrace_status_t = enum(c_int) {
 
 pub const pftrace_string_t = extern struct { data: ?[*]const u8, size: usize };
 
-const MAGIC_PACKET = 0x504B5431;
-const MAGIC_EVENT = 0x45565431;
+const BuilderPhase = enum { idle, packet, event };
+
+/// Opaque, writer-owned builder slot. A pointer remains valid only until its
+/// packet ends; retaining it through a later slot reuse is outside C contract.
+pub const pftrace_packet_t = struct {
+    writer: *pftrace_writer_t = undefined,
+    bookmark: proto.Bookmark = undefined,
+    generation: u64 = 0,
+    active: bool = false,
+    checkpoint: usize = 0,
+    phase: BuilderPhase = .idle,
+};
+
+/// Opaque, writer-owned track-event slot. It can only belong to active packet.
+pub const pftrace_track_event_t = struct {
+    writer: *pftrace_writer_t = undefined,
+    bookmark: proto.Bookmark = undefined,
+    generation: u64 = 0,
+    active: bool = false,
+    packet_generation: u64 = 0,
+    checkpoint: usize = 0,
+    phase: BuilderPhase = .idle,
+    argument_count: usize = 0,
+    category_count: usize = 0,
+    flow_count: usize = 0,
+    terminating_flow_count: usize = 0,
+    task_metadata_assigned: bool = false,
+};
 
 pub const pftrace_writer_t = struct {
     pb: proto.PbWriter,
@@ -30,6 +56,10 @@ pub const pftrace_writer_t = struct {
     file: std.Io.File,
     io_threaded: std.Io.Threaded,
     terminal_status: pftrace_status_t = .ok,
+    active_packet: pftrace_packet_t = undefined,
+    active_event: pftrace_track_event_t = undefined,
+    packet_generation: u64 = 0,
+    event_generation: u64 = 0,
 
     pub fn init(path: []const u8) !*pftrace_writer_t {
         const ptr = try allocator.create(pftrace_writer_t);
@@ -38,6 +68,8 @@ pub const pftrace_writer_t = struct {
         errdefer allocator.free(ptr.pb_storage);
         ptr.pb = proto.PbWriter.init(ptr.pb_storage);
         ptr.terminal_status = .ok;
+        ptr.active_packet.active = false;
+        ptr.active_event.active = false;
         ptr.file_path = try allocator.dupe(u8, path);
         errdefer allocator.free(ptr.file_path);
         ptr.io_threaded = std.Io.Threaded.init(allocator, .{});
@@ -65,10 +97,6 @@ pub const pftrace_writer_t = struct {
         return .ok;
     }
 };
-
-pub const pftrace_packet_t = struct { writer: *pftrace_writer_t, bookmark: proto.Bookmark, magic: u32 };
-const PendingSourceLoc = struct { file: []const u8, func: []const u8, line: u32, iid: u64 };
-pub const pftrace_track_event_t = struct { writer: *pftrace_writer_t, bookmark: proto.Bookmark, pending_loc: ?PendingSourceLoc = null, magic: u32 };
 
 fn mapError(err: proto.Error) pftrace_status_t {
     return switch (err) {
@@ -162,18 +190,18 @@ fn stringArg(ptr: ?[*]const u8) ?pftrace_string_t {
 
 fn packetValid(packet: ?*pftrace_packet_t) ?*pftrace_packet_t {
     const value = packet orelse return null;
-    if (value.magic != MAGIC_PACKET) return null;
+    const writer = value.writer;
+    if (!value.active or value.phase != .packet or !writer.active_packet.active or value != &writer.active_packet) return null;
+    if (writer.terminal_status != .ok) return null;
     return value;
 }
 fn eventValid(event: ?*pftrace_track_event_t) ?*pftrace_track_event_t {
     const value = event orelse return null;
-    if (value.magic != MAGIC_EVENT) return null;
+    const writer = value.writer;
+    if (!value.active or value.phase != .event or !writer.active_event.active or value != &writer.active_event) return null;
+    if (!writer.active_packet.active or writer.active_packet.generation != value.packet_generation) return null;
+    if (writer.terminal_status != .ok) return null;
     return value;
-}
-fn eventWriter(event: ?*pftrace_track_event_t) ?*pftrace_writer_t {
-    const value = eventValid(event) orelse return null;
-    if (value.writer.terminal_status != .ok) return null;
-    return value.writer;
 }
 
 export fn pftrace_status_string(status: c_int) [*:0]const u8 {
@@ -200,8 +228,12 @@ export fn pftrace_init_string(path_value: pftrace_string_t) ?*pftrace_writer_t {
 export fn pftrace_init(path_ptr: ?[*]const u8) ?*pftrace_writer_t {
     return pftrace_init_string(stringArg(path_ptr) orelse return null);
 }
-export fn pftrace_destroy(writer: ?*pftrace_writer_t) void {
-    if (writer) |w| w.deinit();
+export fn pftrace_destroy(writer: ?*pftrace_writer_t) pftrace_status_t {
+    const w = writer orelse return .invalid_argument;
+    if (w.active_packet.active or w.active_event.active) return .invalid_state;
+    const status = w.terminal_status;
+    w.deinit();
+    return status;
 }
 export fn pftrace_flush(writer: ?*pftrace_writer_t) pftrace_status_t {
     return if (writer) |w| w.flush() else .invalid_argument;
@@ -209,24 +241,29 @@ export fn pftrace_flush(writer: ?*pftrace_writer_t) pftrace_status_t {
 
 export fn pftrace_packet_begin(writer: ?*pftrace_writer_t) ?*pftrace_packet_t {
     const w = writer orelse return null;
-    if (w.terminal_status != .ok) return null;
+    if (w.terminal_status != .ok or w.active_packet.active) return null;
+    const checkpoint = w.pb.checkpoint();
     const bookmark = w.pb.beginNested(1) catch return null;
-    const packet = allocator.create(pftrace_packet_t) catch {
-        w.pb.rollback(bookmark.length_offset) catch {};
-        return null;
-    };
-    packet.* = .{ .writer = w, .bookmark = bookmark, .magic = MAGIC_PACKET };
-    return packet;
+    w.packet_generation +%= 1;
+    if (w.packet_generation == 0) w.packet_generation = 1;
+    w.active_packet = .{ .writer = w, .bookmark = bookmark, .generation = w.packet_generation, .active = true, .checkpoint = checkpoint, .phase = .packet };
+    return &w.active_packet;
 }
 export fn pftrace_packet_end(writer: ?*pftrace_writer_t, packet: ?*pftrace_packet_t) pftrace_status_t {
     const w = writer orelse return .invalid_argument;
     const p = packetValid(packet) orelse return .invalid_state;
-    if (p.writer != w or w.terminal_status != .ok) return if (w.terminal_status != .ok) w.terminal_status else .invalid_state;
+    if (p.writer != w) return .invalid_state;
+    if (w.active_event.active) return .invalid_state;
     const status = mutationStatus(w, w.pb.endNested(p.bookmark));
     if (status != .ok) return status;
-    p.magic = 0;
-    allocator.destroy(p);
+    p.active = false;
+    p.phase = .idle;
     return w.flush();
+}
+/// Preferred packet completion API: ownership comes from packet slot itself.
+export fn pftrace_packet_commit(packet: ?*pftrace_packet_t) pftrace_status_t {
+    const p = packetValid(packet) orelse return .invalid_state;
+    return pftrace_packet_end(p.writer, p);
 }
 export fn pftrace_packet_set_timestamp(packet: ?*pftrace_packet_t, value: u64) pftrace_status_t {
     const p = packetValid(packet) orelse return .invalid_state;
@@ -289,31 +326,26 @@ export fn pftrace_write_clock_snapshot(writer: ?*pftrace_writer_t, boottime_ns: 
 
 export fn pftrace_packet_begin_track_event(packet: ?*pftrace_packet_t) ?*pftrace_track_event_t {
     const p = packetValid(packet) orelse return null;
-    if (p.writer.terminal_status != .ok) return null;
+    if (p.writer.active_event.active) return null;
+    const checkpoint = p.writer.pb.checkpoint();
     const bookmark = p.writer.pb.beginNested(schema.TracePacket.TRACK_EVENT) catch return null;
-    const event = allocator.create(pftrace_track_event_t) catch {
-        p.writer.pb.rollback(bookmark.length_offset) catch {};
-        return null;
-    };
-    event.* = .{ .writer = p.writer, .bookmark = bookmark, .magic = MAGIC_EVENT };
-    return event;
+    p.writer.event_generation +%= 1;
+    if (p.writer.event_generation == 0) p.writer.event_generation = 1;
+    p.writer.active_event = .{ .writer = p.writer, .bookmark = bookmark, .generation = p.writer.event_generation, .active = true, .packet_generation = p.generation, .checkpoint = checkpoint, .phase = .event };
+    return &p.writer.active_event;
 }
 export fn pftrace_track_event_end(event: ?*pftrace_track_event_t) pftrace_status_t {
     const e = eventValid(event) orelse return .invalid_state;
     const status = mutationStatus(e.writer, e.writer.pb.endNested(e.bookmark));
     if (status != .ok) return status;
-    if (e.pending_loc) |loc| {
-        allocator.free(loc.file);
-        allocator.free(loc.func);
-    }
-    e.magic = 0;
-    allocator.destroy(e);
+    e.active = false;
+    e.phase = .idle;
     return .ok;
 }
 
 fn eventMutation(event: ?*pftrace_track_event_t, result: proto.Error!void) pftrace_status_t {
-    const w = eventWriter(event) orelse return .invalid_state;
-    return mutationStatus(w, result);
+    const e = eventValid(event) orelse return .invalid_state;
+    return mutationStatus(e.writer, result);
 }
 export fn pftrace_track_event_set_type(event: ?*pftrace_track_event_t, event_type: u32) pftrace_status_t {
     if (event_type > 4) return .invalid_argument;
@@ -330,11 +362,15 @@ export fn pftrace_track_event_set_counter_value(event: ?*pftrace_track_event_t, 
 }
 export fn pftrace_track_event_add_flow_id(event: ?*pftrace_track_event_t, flow_id: u64) pftrace_status_t {
     const e = eventValid(event) orelse return .invalid_state;
-    return eventMutation(event, e.writer.pb.writeInt(schema.TrackEvent.FLOW_IDS, flow_id));
+    const status = eventMutation(event, e.writer.pb.writeInt(schema.TrackEvent.FLOW_IDS, flow_id));
+    if (status == .ok) e.flow_count += 1;
+    return status;
 }
 export fn pftrace_track_event_add_terminating_flow_id(event: ?*pftrace_track_event_t, flow_id: u64) pftrace_status_t {
     const e = eventValid(event) orelse return .invalid_state;
-    return eventMutation(event, e.writer.pb.writeInt(schema.TrackEvent.TERMINATING_FLOW_IDS, flow_id));
+    const status = eventMutation(event, e.writer.pb.writeInt(schema.TrackEvent.TERMINATING_FLOW_IDS, flow_id));
+    if (status == .ok) e.terminating_flow_count += 1;
+    return status;
 }
 
 fn writeEventString(event: ?*pftrace_track_event_t, field: u32, value: pftrace_string_t) pftrace_status_t {
@@ -349,7 +385,10 @@ export fn pftrace_track_event_set_name(event: ?*pftrace_track_event_t, name: ?[*
     return pftrace_track_event_set_name_string(event, stringArg(name) orelse return .invalid_argument);
 }
 export fn pftrace_track_event_add_category_string(event: ?*pftrace_track_event_t, category: pftrace_string_t) pftrace_status_t {
-    return writeEventString(event, schema.TrackEvent.CATEGORIES, category);
+    const e = eventValid(event) orelse return .invalid_state;
+    const status = writeEventString(event, schema.TrackEvent.CATEGORIES, category);
+    if (status == .ok) e.category_count += 1;
+    return status;
 }
 export fn pftrace_track_event_add_category(event: ?*pftrace_track_event_t, category: ?[*]const u8) pftrace_status_t {
     return pftrace_track_event_add_category_string(event, stringArg(category) orelse return .invalid_argument);
@@ -366,7 +405,9 @@ fn annotation(event: ?*pftrace_track_event_t, key: pftrace_string_t, field: u32,
         .boolean => |v| .{ .boolean = v },
     };
     const result = encodeAnnotation(e.writer, k, field, encoded);
-    return eventMutation(event, result);
+    const status = eventMutation(event, result);
+    if (status == .ok and field != schema.DebugAnnotation.STRING_VALUE) e.argument_count += 1;
+    return status;
 }
 export fn pftrace_track_event_set_log_message_string(event: ?*pftrace_track_event_t, body: pftrace_string_t) pftrace_status_t {
     return annotation(event, .{ .data = "log_message".ptr, .size = 11 }, schema.DebugAnnotation.STRING_VALUE, .{ .string = body });
@@ -411,17 +452,11 @@ export fn pftrace_track_event_add_arg_ptr(event: ?*pftrace_track_event_t, key: ?
     return pftrace_track_event_add_arg_ptr_string(event, stringArg(key) orelse return .invalid_argument, value);
 }
 
-// Task execution retains its legacy deferred source-location behavior until E3.S3.
 export fn pftrace_track_event_set_task_execution_string(event: ?*pftrace_track_event_t, file: pftrace_string_t, func: pftrace_string_t, line: u32) pftrace_status_t {
     const f = stringSlice(file) orelse return .invalid_argument;
     const fn_name = stringSlice(func) orelse return .invalid_argument;
     const e = eventValid(event) orelse return .invalid_state;
-    if (e.pending_loc != null) return .invalid_state;
-    const file_copy = allocator.dupe(u8, f) catch return .capacity_exceeded;
-    const func_copy = allocator.dupe(u8, fn_name) catch {
-        allocator.free(file_copy);
-        return .capacity_exceeded;
-    };
+    if (e.task_metadata_assigned) return .invalid_state;
     var iid: u64 = 5381;
     for (f) |c| iid = ((iid << 5) +% iid) +% c;
     for (fn_name) |c| iid = ((iid << 5) +% iid) +% c;
@@ -429,13 +464,9 @@ export fn pftrace_track_event_set_task_execution_string(event: ?*pftrace_track_e
     if (iid == 0) iid = 1;
     const result = encodeTaskExecution(e.writer, iid);
     const status = eventMutation(event, result);
-    if (status != .ok) {
-        allocator.free(file_copy);
-        allocator.free(func_copy);
-        return status;
-    }
-    e.pending_loc = .{ .file = file_copy, .func = func_copy, .line = line, .iid = iid };
-    return .ok;
+    if (status != .ok) return status;
+    e.task_metadata_assigned = true;
+    return status;
 }
 export fn pftrace_track_event_set_task_execution(event: ?*pftrace_track_event_t, file: ?[*]const u8, func: ?[*]const u8, line: u32) pftrace_status_t {
     return pftrace_track_event_set_task_execution_string(event, stringArg(file) orelse return .invalid_argument, stringArg(func) orelse return .invalid_argument, line);

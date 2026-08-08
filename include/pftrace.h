@@ -35,15 +35,19 @@ typedef enum {
 const char *pftrace_status_string(pftrace_status_t status);
 pftrace_status_t pftrace_writer_status(const pftrace_writer_t *writer);
 
-/* One thread exclusively owns a writer. Handles belong to their creating
- * writer; end events before packets and stop construction before destroy. */
+/* One thread exclusively owns a writer. Each writer permits one active packet
+ * and one active track event. Handles belong to their creating writer; event
+ * must end before packet. Ended handles immediately become invalid. Retaining
+ * an ended handle through a later reuse of writer's slot is outside C contract.
+ * destroy rejects active construction and leaves writer usable. */
 pftrace_writer_t *pftrace_init_string(pftrace_string_t file_path);
 pftrace_writer_t *pftrace_init(const char *file_path);
-void pftrace_destroy(pftrace_writer_t *writer);
+pftrace_status_t pftrace_destroy(pftrace_writer_t *writer);
 pftrace_status_t pftrace_flush(pftrace_writer_t *writer);
 
 pftrace_packet_t *pftrace_packet_begin(pftrace_writer_t *writer);
 pftrace_status_t pftrace_packet_end(pftrace_writer_t *writer, pftrace_packet_t *packet);
+pftrace_status_t pftrace_packet_commit(pftrace_packet_t *packet);
 pftrace_status_t pftrace_packet_set_timestamp(pftrace_packet_t *packet, uint64_t timestamp_ns);
 pftrace_status_t pftrace_packet_set_trusted_packet_sequence_id(pftrace_packet_t *packet, uint32_t seq_id);
 

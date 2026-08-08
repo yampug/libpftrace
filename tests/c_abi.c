@@ -30,12 +30,43 @@ int main(void) {
   if (pftrace_packet_set_timestamp(packet, UINT64_C(1)) != PFTRACE_OK ||
       pftrace_packet_set_trusted_packet_sequence_id(packet, UINT32_C(1)) != PFTRACE_OK ||
       pftrace_packet_end(writer, packet) != PFTRACE_OK ||
+      pftrace_packet_set_timestamp(packet, UINT64_C(2)) != PFTRACE_INVALID_STATE ||
       pftrace_writer_status(writer) != PFTRACE_OK) {
     pftrace_destroy(writer);
     (void)remove(path);
     return 1;
   }
-  pftrace_destroy(writer);
+
+  pftrace_packet_t *const packet_with_event = pftrace_packet_begin(writer);
+  pftrace_track_event_t *const event =
+      packet_with_event == NULL ? NULL : pftrace_packet_begin_track_event(packet_with_event);
+  if (packet_with_event == NULL || event == NULL || pftrace_packet_begin(writer) != NULL ||
+      pftrace_destroy(writer) != PFTRACE_INVALID_STATE ||
+      pftrace_packet_end(writer, packet_with_event) != PFTRACE_INVALID_STATE ||
+      pftrace_track_event_end(event) != PFTRACE_OK ||
+      pftrace_track_event_end(event) != PFTRACE_INVALID_STATE ||
+      pftrace_packet_commit(packet_with_event) != PFTRACE_OK) {
+    (void)pftrace_destroy(writer);
+    (void)remove(path);
+    return 1;
+  }
+
+  const char *const path2 = "pftrace-c-abi-test-2.pftrace";
+  pftrace_writer_t *const writer2 = pftrace_init(path2);
+  pftrace_packet_t *const packet2 = pftrace_packet_begin(writer);
+  if (writer2 == NULL || packet2 == NULL ||
+      pftrace_packet_end(writer2, packet2) != PFTRACE_INVALID_STATE ||
+      pftrace_packet_commit(packet2) != PFTRACE_OK ||
+      pftrace_destroy(writer2) != PFTRACE_OK ||
+      remove(path2) != 0) {
+    (void)pftrace_destroy(writer);
+    (void)remove(path);
+    return 1;
+  }
+  if (pftrace_destroy(writer) != PFTRACE_OK) {
+    (void)remove(path);
+    return 1;
+  }
 
   return remove(path) == 0 ? 0 : 1;
 }
