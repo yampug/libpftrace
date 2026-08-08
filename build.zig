@@ -63,10 +63,21 @@ pub fn build(b: *std.Build) void {
     const run_proto_tests = b.addRunArtifact(proto_tests);
     const run_library_tests = b.addRunArtifact(library_tests);
     const run_encoder_failure_tests = b.addRunArtifact(encoder_failure_tests);
+    const writer_failure_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/writer_failure.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "pftrace", .module = lib_mod }},
+        }),
+    });
+    const run_writer_failure_tests = b.addRunArtifact(writer_failure_tests);
     const zig_tests_step = b.step("test-zig", "Run Zig encoder and library unit tests");
     zig_tests_step.dependOn(&run_proto_tests.step);
     zig_tests_step.dependOn(&run_library_tests.step);
     zig_tests_step.dependOn(&run_encoder_failure_tests.step);
+    const writer_failure_step = b.step("test-writer-failure", "Run deterministic writer sink failure tests");
+    writer_failure_step.dependOn(&run_writer_failure_tests.step);
 
     const c_abi_test = b.addExecutable(.{
         .name = "pftrace-c-abi-test",
@@ -85,6 +96,24 @@ pub fn build(b: *std.Build) void {
     const run_c_abi_test = b.addRunArtifact(c_abi_test);
     const c_abi_step = b.step("test-c-abi", "Build and run the C public ABI test");
     c_abi_step.dependOn(&run_c_abi_test.step);
+
+    const c_api_failures = b.addExecutable(.{
+        .name = "pftrace-c-api-failures",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    c_api_failures.root_module.addCSourceFiles(.{
+        .files = &.{"tests/c_api_failures.c"},
+        .flags = &.{ "-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+    });
+    c_api_failures.root_module.addIncludePath(b.path("include"));
+    c_api_failures.root_module.linkLibrary(lib);
+    const run_c_api_failures = b.addRunArtifact(c_api_failures);
+    const c_api_failures_step = b.step("test-c-api-failures", "Run C public API failure matrix");
+    c_api_failures_step.dependOn(&run_c_api_failures.step);
 
     const cpp_abi_test = b.addExecutable(.{
         .name = "pftrace-cpp-abi-test",
@@ -134,6 +163,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all unit and public ABI tests");
     test_step.dependOn(zig_tests_step);
     test_step.dependOn(c_abi_step);
+    test_step.dependOn(c_api_failures_step);
+    test_step.dependOn(writer_failure_step);
     test_step.dependOn(cpp_abi_step);
     test_step.dependOn(examples_step);
 }
