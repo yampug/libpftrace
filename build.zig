@@ -46,12 +46,27 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const proto_module = b.createModule(.{
+        .root_source_file = b.path("src/proto.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const encoder_failure_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/encoder_failure.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "proto", .module = proto_module }},
+        }),
+    });
 
     const run_proto_tests = b.addRunArtifact(proto_tests);
     const run_library_tests = b.addRunArtifact(library_tests);
+    const run_encoder_failure_tests = b.addRunArtifact(encoder_failure_tests);
     const zig_tests_step = b.step("test-zig", "Run Zig encoder and library unit tests");
     zig_tests_step.dependOn(&run_proto_tests.step);
     zig_tests_step.dependOn(&run_library_tests.step);
+    zig_tests_step.dependOn(&run_encoder_failure_tests.step);
 
     const c_abi_test = b.addExecutable(.{
         .name = "pftrace-c-abi-test",

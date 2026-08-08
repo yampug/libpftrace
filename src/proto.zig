@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const WireType = enum(u3) {
     Varint = 0,
@@ -10,6 +11,7 @@ pub const WireType = enum(u3) {
 /// Errors deliberately remain internal until the public status API maps them.
 pub const Error = error{
     CapacityExceeded,
+    InjectedFailure,
     InvalidBookmark,
     IntegerOverflow,
     MessageTooLarge,
@@ -21,6 +23,13 @@ pub const length_varint_max_bytes = 5;
 const Frame = struct {
     length_offset: usize,
     payload_offset: usize,
+};
+
+/// Present only in test builds. Keeping it conditional prevents both a layout
+/// change and a runtime branch in production encoders.
+const FailureInjection = struct {
+    append_count: usize = 0,
+    fail_on_append: ?usize = null,
 };
 
 /// Opaque proof that a particular nested message is currently open in one writer.
@@ -37,6 +46,7 @@ pub const PbWriter = struct {
     max_message_size: u32,
     frames: [max_nested_depth]Frame = undefined,
     frame_count: usize = 0,
+    failure_injection: if (builtin.is_test) FailureInjection else void = if (builtin.is_test) .{} else {},
 
     pub fn init(buffer: []u8) PbWriter {
         return initWithMaxMessageSize(buffer, std.math.maxInt(u32));
@@ -74,6 +84,24 @@ pub const PbWriter = struct {
         return self.buffer.len - self.cursor;
     }
 
+    pub fn nestingDepth(self: *const PbWriter) usize {
+        return self.frame_count;
+    }
+
+    /// Reject exactly one selected append in test builds. Append points are
+    /// one-based; null disables injection. This compiles to no production
+    /// state or control flow.
+    pub fn setAppendFailurePoint(self: *PbWriter, append_point: ?usize) void {
+        if (comptime builtin.is_test) {
+            self.failure_injection = .{ .fail_on_append = append_point };
+        }
+    }
+
+    pub fn appendAttemptCount(self: *const PbWriter) usize {
+        if (comptime builtin.is_test) return self.failure_injection.append_count;
+        return 0;
+    }
+
     fn checkedAdd(a: usize, b: usize) Error!usize {
         return std.math.add(usize, a, b) catch error.IntegerOverflow;
     }
@@ -88,9 +116,26 @@ pub const PbWriter = struct {
     fn reserve(self: *PbWriter, count: usize) Error![]u8 {
         const end = try checkedAdd(self.cursor, count);
         if (end > self.buffer.len) return error.CapacityExceeded;
+        if (comptime builtin.is_test) {
+            self.failure_injection.append_count += 1;
+            if (self.failure_injection.fail_on_append) |append_point| {
+                if (self.failure_injection.append_count == append_point) {
+                    self.failure_injection.fail_on_append = null;
+                    return error.InjectedFailure;
+                }
+            }
+        }
         const result = self.buffer[self.cursor..end];
         self.cursor = end;
         return result;
+    }
+
+    /// Check a compound write before its individual append points begin.
+    /// This preserves the pre-existing all-or-nothing capacity behavior while
+    /// still permitting test injection between those append points.
+    fn ensureCapacity(self: *const PbWriter, count: usize) Error!void {
+        const end = try checkedAdd(self.cursor, count);
+        if (end > self.buffer.len) return error.CapacityExceeded;
     }
 
     fn writeVarintUnchecked(destination: []u8, value: u64) void {
@@ -107,9 +152,11 @@ pub const PbWriter = struct {
         const tag = (@as(u64, field_id) << 3) | @as(u64, @intFromEnum(WireType.Varint));
         const tag_len = varintLen(tag);
         const value_len = varintLen(value);
-        const destination = try self.reserve(try checkedAdd(tag_len, value_len));
-        writeVarintUnchecked(destination[0..tag_len], tag);
-        writeVarintUnchecked(destination[tag_len..], value);
+        try self.ensureCapacity(try checkedAdd(tag_len, value_len));
+        const tag_destination = try self.reserve(tag_len);
+        writeVarintUnchecked(tag_destination, tag);
+        const value_destination = try self.reserve(value_len);
+        writeVarintUnchecked(value_destination, value);
     }
 
     pub fn writeTag(self: *PbWriter, field_id: u32, wire_type: WireType) Error!void {
@@ -145,13 +192,15 @@ pub const PbWriter = struct {
 
     pub fn writeString(self: *PbWriter, field_id: u32, value: []const u8) Error!void {
         const tag = (@as(u64, field_id) << 3) | @as(u64, @intFromEnum(WireType.LengthDelimited));
-        const total = try checkedAdd(try checkedAdd(varintLen(tag), varintLen(value.len)), value.len);
-        const destination = try self.reserve(total);
         const tag_len = varintLen(tag);
-        writeVarintUnchecked(destination[0..tag_len], tag);
         const length_len = varintLen(value.len);
-        writeVarintUnchecked(destination[tag_len .. tag_len + length_len], value.len);
-        @memcpy(destination[tag_len + length_len ..], value);
+        try self.ensureCapacity(try checkedAdd(try checkedAdd(tag_len, length_len), value.len));
+        const tag_destination = try self.reserve(tag_len);
+        writeVarintUnchecked(tag_destination, tag);
+        const length_destination = try self.reserve(length_len);
+        writeVarintUnchecked(length_destination, value.len);
+        const body_destination = try self.reserve(value.len);
+        @memcpy(body_destination, value);
     }
 
     pub fn writeBytes(self: *PbWriter, field_id: u32, value: []const u8) Error!void {
@@ -180,10 +229,11 @@ pub const PbWriter = struct {
         if (self.frame_count == max_nested_depth) return error.InvalidBookmark;
         const tag = (@as(u64, field_id) << 3) | @as(u64, @intFromEnum(WireType.LengthDelimited));
         const tag_len = varintLen(tag);
-        const total = try checkedAdd(tag_len, length_varint_max_bytes);
-        const destination = try self.reserve(total);
-        writeVarintUnchecked(destination[0..tag_len], tag);
-        @memset(destination[tag_len..], 0);
+        try self.ensureCapacity(try checkedAdd(tag_len, length_varint_max_bytes));
+        const tag_destination = try self.reserve(tag_len);
+        writeVarintUnchecked(tag_destination, tag);
+        const length_destination = try self.reserve(length_varint_max_bytes);
+        @memset(length_destination, 0);
 
         const length_offset = self.cursor - length_varint_max_bytes;
         self.frames[self.frame_count] = .{
@@ -285,10 +335,26 @@ test "length varints cover every uint32 width transition" {
 test "primitive capacity boundaries" {
     const Cases = struct { required: usize, write: *const fn (*PbWriter) Error!void };
     const cases = [_]Cases{
-        .{ .required = 2, .write = struct { fn f(pb: *PbWriter) Error!void { try pb.writeVarint(150); } }.f },
-        .{ .required = 4, .write = struct { fn f(pb: *PbWriter) Error!void { try pb.writeFixed32(1); } }.f },
-        .{ .required = 8, .write = struct { fn f(pb: *PbWriter) Error!void { try pb.writeFixed64(1); } }.f },
-        .{ .required = 5, .write = struct { fn f(pb: *PbWriter) Error!void { try pb.writeString(1, "abc"); } }.f },
+        .{ .required = 2, .write = struct {
+            fn f(pb: *PbWriter) Error!void {
+                try pb.writeVarint(150);
+            }
+        }.f },
+        .{ .required = 4, .write = struct {
+            fn f(pb: *PbWriter) Error!void {
+                try pb.writeFixed32(1);
+            }
+        }.f },
+        .{ .required = 8, .write = struct {
+            fn f(pb: *PbWriter) Error!void {
+                try pb.writeFixed64(1);
+            }
+        }.f },
+        .{ .required = 5, .write = struct {
+            fn f(pb: *PbWriter) Error!void {
+                try pb.writeString(1, "abc");
+            }
+        }.f },
     };
     for (cases) |case| {
         var below: [8]u8 = undefined;
