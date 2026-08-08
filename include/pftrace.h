@@ -29,7 +29,10 @@ typedef struct { const char *data; size_t size; } pftrace_string_t;
 
 /* Version 1 options. Defaults: 1 MiB packet scratch/output batch/maximum
  * packet/string bytes; 1024 arguments, categories, and each flow kind; 64
- * nested messages; unlimited trace bytes; and flush_each_packet false. Call
+ * nested messages; unlimited trace bytes; and flush_each_packet false.
+ * Complete packets batch until output_batch_capacity; a packet that would not
+ * fit first flushes existing batch, then appends whole packet. A full batch
+ * flushes automatically. flush_each_packet instead flushes each commit. Call
  * pftrace_writer_options_init before changing fields.
  * `struct_size` permits a newer library to accept an older caller's prefix;
  * fields beyond it retain their documented defaults. Memory reserved during
@@ -69,7 +72,11 @@ pftrace_status_t pftrace_writer_status(const pftrace_writer_t *writer);
  * and one active track event. Handles belong to their creating writer; event
  * must end before packet. Ended handles immediately become invalid. Retaining
  * an ended handle through a later reuse of writer's slot is outside C contract.
- * destroy rejects active construction and leaves writer usable. */
+ * finalize and destroy reject active construction and leave writer usable.
+ * finalize flushes then seals writer; it is idempotent and later mutations
+ * return PFTRACE_INVALID_STATE (unless sticky PFTRACE_IO_ERROR dominates).
+ * destroy finalizes, releases writer, and returns final status; do not reuse
+ * writer pointer after destroy. */
 /* Initializes `options` to stable version-1 defaults. */
 pftrace_status_t pftrace_writer_options_init(pftrace_writer_options_t *options);
 /* Validates options before creating or truncating file_path. On success stores
@@ -97,7 +104,10 @@ pftrace_status_t pftrace_init_callback_with_options(
 pftrace_writer_t *pftrace_init_string(pftrace_string_t file_path);
 pftrace_writer_t *pftrace_init(const char *file_path);
 pftrace_status_t pftrace_destroy(pftrace_writer_t *writer);
+/* Flushes every complete packet currently buffered. Empty/repeated successful
+ * flushes are no-ops. A successful flush leaves writer usable. */
 pftrace_status_t pftrace_flush(pftrace_writer_t *writer);
+pftrace_status_t pftrace_finalize(pftrace_writer_t *writer);
 
 pftrace_packet_t *pftrace_packet_begin(pftrace_writer_t *writer);
 pftrace_status_t pftrace_packet_end(pftrace_writer_t *writer, pftrace_packet_t *packet);

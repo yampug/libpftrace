@@ -95,6 +95,8 @@ pub const pftrace_writer_t = struct {
     io_threaded: std.Io.Threaded,
     options: WriterOptions,
     terminal_status: pftrace_status_t = .ok,
+    finalized: bool = false,
+    accepted_trace_bytes: u64 = 0,
     active_packet: pftrace_packet_t = undefined,
     active_event: pftrace_track_event_t = undefined,
     packet_generation: u64 = 0,
@@ -139,13 +141,13 @@ pub const pftrace_writer_t = struct {
     }
 
     pub fn deinit(self: *pftrace_writer_t) pftrace_status_t {
-        const status = self.flush();
+        const status = self.finalize();
         self.sink.deinit(self.io_threaded.io());
         self.deinitWithoutSink();
         return status;
     }
 
-    pub fn flush(self: *pftrace_writer_t) pftrace_status_t {
+    fn flushBuffered(self: *pftrace_writer_t) pftrace_status_t {
         if (self.terminal_status != .ok) return self.terminal_status;
         if (self.pb.written().len == 0) return .ok;
         self.sink.writeAll(self.io_threaded.io(), self.pb.written()) catch {
@@ -153,6 +155,42 @@ pub const pftrace_writer_t = struct {
             return .io_error;
         };
         self.pb.reset();
+        return .ok;
+    }
+
+    pub fn flush(self: *pftrace_writer_t) pftrace_status_t {
+        if (self.terminal_status != .ok) return self.terminal_status;
+        if (self.finalized) return .invalid_state;
+        return self.flushBuffered();
+    }
+
+    pub fn finalize(self: *pftrace_writer_t) pftrace_status_t {
+        if (self.terminal_status != .ok) return self.terminal_status;
+        if (self.finalized) return .ok;
+        const status = self.flushBuffered();
+        self.finalized = true;
+        return status;
+    }
+
+    /// Adds one complete Trace.packet field to output batch. Never exposes a
+    /// packet prefix to sink and never flushes for a rejected trace-cap packet.
+    pub fn commitPacket(self: *pftrace_writer_t, packet: []const u8) pftrace_status_t {
+        if (self.terminal_status != .ok) return self.terminal_status;
+        if (self.finalized) return .invalid_state;
+        const packet_len: u64 = @intCast(packet.len);
+        const next_trace_bytes = std.math.add(u64, self.accepted_trace_bytes, packet_len) catch return .capacity_exceeded;
+        if (self.options.maximum_trace_bytes != 0 and next_trace_bytes > @as(u64, @intCast(self.options.maximum_trace_bytes))) return .capacity_exceeded;
+
+        if (packet.len > self.pb.remaining()) {
+            const status = self.flushBuffered();
+            if (status != .ok) return status;
+        }
+        // Options require maximum_packet_bytes <= output_batch_capacity, so a
+        // complete validated packet always fits after at most one flush.
+        const status = mutationStatus(self, self.pb.appendEncoded(packet));
+        if (status != .ok) return status;
+        self.accepted_trace_bytes = next_trace_bytes;
+        if (self.options.flush_each_packet or self.pb.remaining() == 0) return self.flushBuffered();
         return .ok;
     }
 };
@@ -198,6 +236,7 @@ fn optionsFromC(value: ?*const pftrace_writer_options_t) error{InvalidArgument}!
 
 fn mutationStatus(writer: *pftrace_writer_t, result: proto.Error!void) pftrace_status_t {
     if (writer.terminal_status != .ok) return writer.terminal_status;
+    if (writer.finalized) return .invalid_state;
     result catch |err| return mapError(err);
     return .ok;
 }
@@ -212,39 +251,39 @@ fn packetMutation(packet: *pftrace_packet_t, result: proto.Error!void) pftrace_s
     return latchPacketError(packet, mutationStatus(packet.writer, result));
 }
 
-fn encodeProcess(writer: *pftrace_writer_t, uuid: u64, pid: i32, name: []const u8) proto.Error!void {
-    const packet = try writer.pb.beginNested(1);
-    const descriptor = try writer.pb.beginNested(schema.TracePacket.TRACK_DESCRIPTOR);
-    try writer.pb.writeInt(schema.TrackDescriptor.UUID, uuid);
-    const process = try writer.pb.beginNested(schema.TrackDescriptor.PROCESS);
-    try writer.pb.writeInt(schema.ProcessDescriptor.PID, pid);
-    try writer.pb.writeString(schema.ProcessDescriptor.PROCESS_NAME, name);
-    try writer.pb.endNested(process);
-    try writer.pb.endNested(descriptor);
-    try writer.pb.endNested(packet);
+fn encodeProcess(pb: *proto.PbWriter, uuid: u64, pid: i32, name: []const u8) proto.Error!void {
+    const packet = try pb.beginNested(1);
+    const descriptor = try pb.beginNested(schema.TracePacket.TRACK_DESCRIPTOR);
+    try pb.writeInt(schema.TrackDescriptor.UUID, uuid);
+    const process = try pb.beginNested(schema.TrackDescriptor.PROCESS);
+    try pb.writeInt(schema.ProcessDescriptor.PID, pid);
+    try pb.writeString(schema.ProcessDescriptor.PROCESS_NAME, name);
+    try pb.endNested(process);
+    try pb.endNested(descriptor);
+    try pb.endNested(packet);
 }
-fn encodeThread(writer: *pftrace_writer_t, uuid: u64, parent_uuid: u64, pid: i32, tid: i32, name: []const u8) proto.Error!void {
-    const packet = try writer.pb.beginNested(1);
-    const descriptor = try writer.pb.beginNested(schema.TracePacket.TRACK_DESCRIPTOR);
-    try writer.pb.writeInt(schema.TrackDescriptor.UUID, uuid);
-    try writer.pb.writeInt(schema.TrackDescriptor.PARENT_UUID, parent_uuid);
-    const thread = try writer.pb.beginNested(schema.TrackDescriptor.THREAD);
-    try writer.pb.writeInt(schema.ThreadDescriptor.PID, pid);
-    try writer.pb.writeInt(schema.ThreadDescriptor.TID, tid);
-    try writer.pb.writeString(schema.ThreadDescriptor.THREAD_NAME, name);
-    try writer.pb.endNested(thread);
-    try writer.pb.endNested(descriptor);
-    try writer.pb.endNested(packet);
+fn encodeThread(pb: *proto.PbWriter, uuid: u64, parent_uuid: u64, pid: i32, tid: i32, name: []const u8) proto.Error!void {
+    const packet = try pb.beginNested(1);
+    const descriptor = try pb.beginNested(schema.TracePacket.TRACK_DESCRIPTOR);
+    try pb.writeInt(schema.TrackDescriptor.UUID, uuid);
+    try pb.writeInt(schema.TrackDescriptor.PARENT_UUID, parent_uuid);
+    const thread = try pb.beginNested(schema.TrackDescriptor.THREAD);
+    try pb.writeInt(schema.ThreadDescriptor.PID, pid);
+    try pb.writeInt(schema.ThreadDescriptor.TID, tid);
+    try pb.writeString(schema.ThreadDescriptor.THREAD_NAME, name);
+    try pb.endNested(thread);
+    try pb.endNested(descriptor);
+    try pb.endNested(packet);
 }
-fn encodeClockSnapshot(writer: *pftrace_writer_t, boottime_ns: u64) proto.Error!void {
-    const packet = try writer.pb.beginNested(1);
-    const snapshot = try writer.pb.beginNested(schema.TracePacket.CLOCK_SNAPSHOT);
-    const clock = try writer.pb.beginNested(schema.ClockSnapshot.CLOCKS);
-    try writer.pb.writeInt(schema.Clock.CLOCK_ID, 6);
-    try writer.pb.writeInt(schema.Clock.TIMESTAMP, boottime_ns);
-    try writer.pb.endNested(clock);
-    try writer.pb.endNested(snapshot);
-    try writer.pb.endNested(packet);
+fn encodeClockSnapshot(pb: *proto.PbWriter, boottime_ns: u64) proto.Error!void {
+    const packet = try pb.beginNested(1);
+    const snapshot = try pb.beginNested(schema.TracePacket.CLOCK_SNAPSHOT);
+    const clock = try pb.beginNested(schema.ClockSnapshot.CLOCKS);
+    try pb.writeInt(schema.Clock.CLOCK_ID, 6);
+    try pb.writeInt(schema.Clock.TIMESTAMP, boottime_ns);
+    try pb.endNested(clock);
+    try pb.endNested(snapshot);
+    try pb.endNested(packet);
 }
 const AnnotationValue = union(enum) { string: []const u8, int: i64, uint: u64, double: f64, boolean: bool };
 fn encodeAnnotation(pb: *proto.PbWriter, key: []const u8, field: u32, value: AnnotationValue) proto.Error!void {
@@ -405,6 +444,12 @@ export fn pftrace_destroy(writer: ?*pftrace_writer_t) pftrace_status_t {
 export fn pftrace_flush(writer: ?*pftrace_writer_t) pftrace_status_t {
     return if (writer) |w| w.flush() else .invalid_argument;
 }
+export fn pftrace_finalize(writer: ?*pftrace_writer_t) pftrace_status_t {
+    const w = writer orelse return .invalid_argument;
+    if (w.terminal_status != .ok) return w.terminal_status;
+    if (w.active_packet.active or w.active_event.active) return .invalid_state;
+    return w.finalize();
+}
 
 export fn pftrace_packet_begin(writer: ?*pftrace_writer_t) ?*pftrace_packet_t {
     const w = writer orelse return null;
@@ -436,16 +481,14 @@ export fn pftrace_packet_end(writer: ?*pftrace_writer_t, packet: ?*pftrace_packe
         p.phase = .idle;
         return close_status;
     }
-    const output_checkpoint = w.pb.checkpoint();
     if (w.packet_pb.written().len > w.options.maximum_packet_bytes) {
         w.packet_pb.reset();
         p.active = false;
         p.phase = .idle;
         return .message_too_large;
     }
-    const copy_status = mutationStatus(w, w.pb.appendEncoded(w.packet_pb.written()));
+    const copy_status = w.commitPacket(w.packet_pb.written());
     if (copy_status != .ok) {
-        w.pb.rollback(output_checkpoint) catch unreachable;
         w.packet_pb.reset();
         p.active = false;
         p.phase = .idle;
@@ -474,15 +517,18 @@ export fn pftrace_packet_set_trusted_packet_sequence_id(packet: ?*pftrace_packet
 
 fn descriptorProcess(writer: *pftrace_writer_t, uuid: u64, pid: i32, name: []const u8) pftrace_status_t {
     if (writer.terminal_status != .ok) return writer.terminal_status;
+    if (writer.finalized) return .invalid_state;
     if (name.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
-    const checkpoint = writer.pb.checkpoint();
-    const result = encodeProcess(writer, uuid, pid, name);
+    writer.packet_pb.reset();
+    const result = encodeProcess(&writer.packet_pb, uuid, pid, name);
     const status = mutationStatus(writer, result);
     if (status != .ok) {
-        writer.pb.rollback(checkpoint) catch unreachable;
+        writer.packet_pb.reset();
         return status;
     }
-    return writer.flush();
+    const commit_status = writer.commitPacket(writer.packet_pb.written());
+    writer.packet_pb.reset();
+    return commit_status;
 }
 export fn pftrace_write_process_track_descriptor_string(writer: ?*pftrace_writer_t, uuid: u64, pid: i32, name: pftrace_string_t) pftrace_status_t {
     const w = writer orelse return .invalid_argument;
@@ -495,15 +541,18 @@ export fn pftrace_write_process_track_descriptor(writer: ?*pftrace_writer_t, uui
 
 fn descriptorThread(writer: *pftrace_writer_t, uuid: u64, parent_uuid: u64, pid: i32, tid: i32, name: []const u8) pftrace_status_t {
     if (writer.terminal_status != .ok) return writer.terminal_status;
+    if (writer.finalized) return .invalid_state;
     if (name.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
-    const checkpoint = writer.pb.checkpoint();
-    const result = encodeThread(writer, uuid, parent_uuid, pid, tid, name);
+    writer.packet_pb.reset();
+    const result = encodeThread(&writer.packet_pb, uuid, parent_uuid, pid, tid, name);
     const status = mutationStatus(writer, result);
     if (status != .ok) {
-        writer.pb.rollback(checkpoint) catch unreachable;
+        writer.packet_pb.reset();
         return status;
     }
-    return writer.flush();
+    const commit_status = writer.commitPacket(writer.packet_pb.written());
+    writer.packet_pb.reset();
+    return commit_status;
 }
 export fn pftrace_write_thread_track_descriptor_string(writer: ?*pftrace_writer_t, uuid: u64, parent_uuid: u64, pid: i32, tid: i32, name: pftrace_string_t) pftrace_status_t {
     const w = writer orelse return .invalid_argument;
@@ -517,14 +566,17 @@ export fn pftrace_write_thread_track_descriptor(writer: ?*pftrace_writer_t, uuid
 export fn pftrace_write_clock_snapshot(writer: ?*pftrace_writer_t, boottime_ns: u64) pftrace_status_t {
     const w = writer orelse return .invalid_argument;
     if (w.terminal_status != .ok) return w.terminal_status;
-    const checkpoint = w.pb.checkpoint();
-    const result = encodeClockSnapshot(w, boottime_ns);
+    if (w.finalized) return .invalid_state;
+    w.packet_pb.reset();
+    const result = encodeClockSnapshot(&w.packet_pb, boottime_ns);
     const status = mutationStatus(w, result);
     if (status != .ok) {
-        w.pb.rollback(checkpoint) catch unreachable;
+        w.packet_pb.reset();
         return status;
     }
-    return w.flush();
+    const commit_status = w.commitPacket(w.packet_pb.written());
+    w.packet_pb.reset();
+    return commit_status;
 }
 
 export fn pftrace_packet_begin_track_event(packet: ?*pftrace_packet_t) ?*pftrace_track_event_t {
@@ -780,4 +832,27 @@ test "writer options accept older prefixes and reject contradictory values" {
     raw.maximum_packet_bytes = 64;
     raw.maximum_nesting_depth = proto.max_nested_depth + 1;
     try std.testing.expectError(error.InvalidArgument, optionsFromC(&raw));
+}
+
+test "trace cap rejects before batch mutation and leaves capacity usable" {
+    var output: [16]u8 = undefined;
+    var scratch: [16]u8 = undefined;
+    var writer = testWriter(&output, &scratch);
+    writer.options.maximum_trace_bytes = 3;
+
+    try std.testing.expectEqual(pftrace_status_t.ok, writer.commitPacket(&.{ 1, 2 }));
+    const prefix = writer.pb.written();
+    try std.testing.expectEqual(pftrace_status_t.capacity_exceeded, writer.commitPacket(&.{ 3, 4 }));
+    try std.testing.expectEqualSlices(u8, prefix, writer.pb.written());
+    try std.testing.expectEqual(pftrace_status_t.ok, writer.commitPacket(&.{3}));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, writer.pb.written());
+}
+
+test "trace byte accounting rejects overflow" {
+    var output: [16]u8 = undefined;
+    var scratch: [16]u8 = undefined;
+    var writer = testWriter(&output, &scratch);
+    writer.accepted_trace_bytes = std.math.maxInt(u64) - 1;
+    try std.testing.expectEqual(pftrace_status_t.capacity_exceeded, writer.commitPacket(&.{ 1, 2 }));
+    try std.testing.expectEqual(@as(usize, 0), writer.pb.written().len);
 }

@@ -139,7 +139,13 @@ int main(void) {
                                          &callback_writer) != PFTRACE_OK ||
       callback_writer == NULL ||
       pftrace_write_clock_snapshot(callback_writer, UINT64_C(42)) != PFTRACE_OK ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(43)) != PFTRACE_OK ||
+      memory.calls != 0 || pftrace_flush(callback_writer) != PFTRACE_OK ||
       memory.calls != 1 || memory.bytes == 0 ||
+      pftrace_flush(callback_writer) != PFTRACE_OK || memory.calls != 1 ||
+      pftrace_finalize(callback_writer) != PFTRACE_OK ||
+      pftrace_finalize(callback_writer) != PFTRACE_OK ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(44)) != PFTRACE_INVALID_STATE ||
       pftrace_destroy(callback_writer) != PFTRACE_OK) {
     return 1;
   }
@@ -148,7 +154,8 @@ int main(void) {
   callback_writer = NULL;
   if (pftrace_init_callback_with_options(capture_write, &failing, NULL,
                                          &callback_writer) != PFTRACE_OK ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(1)) != PFTRACE_IO_ERROR ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(1)) != PFTRACE_OK ||
+      pftrace_finalize(callback_writer) != PFTRACE_IO_ERROR ||
       failing.calls != 1 || pftrace_writer_status(callback_writer) != PFTRACE_IO_ERROR ||
       pftrace_write_clock_snapshot(callback_writer, UINT64_C(2)) != PFTRACE_IO_ERROR ||
       failing.calls != 1 || pftrace_destroy(callback_writer) != PFTRACE_IO_ERROR) {
@@ -160,8 +167,49 @@ int main(void) {
   if (borrowed == NULL ||
       pftrace_init_fd_with_options(fileno(borrowed), NULL, &callback_writer) != PFTRACE_OK ||
       pftrace_write_clock_snapshot(callback_writer, UINT64_C(3)) != PFTRACE_OK ||
+      pftrace_finalize(callback_writer) != PFTRACE_OK ||
       pftrace_destroy(callback_writer) != PFTRACE_OK ||
       fputs("still-open", borrowed) < 0 || fclose(borrowed) != 0) {
+    return 1;
+  }
+
+  if (pftrace_writer_options_init(&options) != PFTRACE_OK) {
+    return 1;
+  }
+  options.packet_scratch_capacity = 8;
+  options.output_batch_capacity = 8;
+  options.maximum_packet_bytes = 8;
+  memory = (struct callback_state){0, 0, PFTRACE_OK};
+  callback_writer = NULL;
+  pftrace_packet_t *batch_packet = NULL;
+  if (pftrace_init_callback_with_options(capture_write, &memory, &options,
+                                         &callback_writer) != PFTRACE_OK ||
+      (batch_packet = pftrace_packet_begin(callback_writer)) == NULL ||
+      pftrace_packet_commit(batch_packet) != PFTRACE_OK || memory.calls != 0 ||
+      (batch_packet = pftrace_packet_begin(callback_writer)) == NULL ||
+      pftrace_packet_commit(batch_packet) != PFTRACE_OK || memory.calls != 0 ||
+      (batch_packet = pftrace_packet_begin(callback_writer)) == NULL ||
+      pftrace_packet_commit(batch_packet) != PFTRACE_OK || memory.calls != 0 ||
+      (batch_packet = pftrace_packet_begin(callback_writer)) == NULL ||
+      pftrace_packet_commit(batch_packet) != PFTRACE_OK || memory.calls != 1 ||
+      (batch_packet = pftrace_packet_begin(callback_writer)) == NULL ||
+      pftrace_packet_commit(batch_packet) != PFTRACE_OK || memory.calls != 1 ||
+      pftrace_flush(callback_writer) != PFTRACE_OK || memory.calls != 2 ||
+      pftrace_destroy(callback_writer) != PFTRACE_OK) {
+    return 1;
+  }
+
+  if (pftrace_writer_options_init(&options) != PFTRACE_OK) {
+    return 1;
+  }
+  options.flush_each_packet = true;
+  memory = (struct callback_state){0, 0, PFTRACE_OK};
+  callback_writer = NULL;
+  if (pftrace_init_callback_with_options(capture_write, &memory, &options,
+                                         &callback_writer) != PFTRACE_OK ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(4)) != PFTRACE_OK ||
+      pftrace_write_clock_snapshot(callback_writer, UINT64_C(5)) != PFTRACE_OK ||
+      memory.calls != 2 || pftrace_destroy(callback_writer) != PFTRACE_OK) {
     return 1;
   }
 
