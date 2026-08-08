@@ -22,6 +22,30 @@ static pftrace_status_t capture_write(void *context, const uint8_t *bytes,
 }
 
 int main(void) {
+  const uint64_t flow_ids[] = {UINT64_C(1)};
+  const uint64_t terminating_flow_ids[] = {UINT64_C(2)};
+  const pftrace_string_t categories[] = {{"category", 8}};
+  pftrace_arg_t arguments[] = {
+      {{"string", 6}, PFTRACE_ARG_TYPE_STRING, {{NULL, 0}}},
+      {{"int64", 5}, PFTRACE_ARG_TYPE_INT64, {{NULL, 0}}},
+      {{"uint64", 6}, PFTRACE_ARG_TYPE_UINT64, {{NULL, 0}}},
+      {{"double", 6}, PFTRACE_ARG_TYPE_DOUBLE, {{NULL, 0}}},
+      {{"bool", 4}, PFTRACE_ARG_TYPE_BOOL, {{NULL, 0}}},
+      {{"pointer", 7}, PFTRACE_ARG_TYPE_POINTER, {{NULL, 0}}},
+  };
+  arguments[0].value.string_value = (pftrace_string_t){"value", 5};
+  arguments[1].value.int64_value = INT64_C(-1);
+  arguments[2].value.uint64_value = UINT64_C(1);
+  arguments[3].value.double_value = 1.5;
+  arguments[4].value.bool_value = true;
+  arguments[5].value.pointer_value = UINT64_C(0x1234);
+  const pftrace_event_t direct_event = {
+      UINT64_C(1), 0, 1, 2, PFTRACE_TRACK_EVENT_TYPE_INSTANT, {"event", 5}, 0,
+      flow_ids, 1, terminating_flow_ids, 1, categories, 1, arguments,
+      sizeof(arguments) / sizeof(arguments[0])};
+  if (direct_event.arguments[5].type != PFTRACE_ARG_TYPE_POINTER) {
+    return 1;
+  }
   _Static_assert(PFTRACE_OK == 0 && PFTRACE_INVALID_ARGUMENT == 1 &&
                      PFTRACE_INVALID_STATE == 2 &&
                      PFTRACE_CAPACITY_EXCEEDED == 3 &&

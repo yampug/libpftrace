@@ -60,6 +60,57 @@ typedef enum {
   PFTRACE_TRACK_EVENT_TYPE_COUNTER = 4,
 } pftrace_track_event_type_t;
 
+/* Direct-event argument tag and payload. `key` and string values follow the
+ * pftrace_string_t null/size rule. Pointer values are represented as integers;
+ * libpftrace never dereferences them. */
+typedef enum {
+  PFTRACE_ARG_TYPE_STRING = 0, PFTRACE_ARG_TYPE_INT64 = 1,
+  PFTRACE_ARG_TYPE_UINT64 = 2, PFTRACE_ARG_TYPE_DOUBLE = 3,
+  PFTRACE_ARG_TYPE_BOOL = 4, PFTRACE_ARG_TYPE_POINTER = 5,
+} pftrace_arg_type_t;
+
+typedef union {
+  pftrace_string_t string_value;
+  int64_t int64_value;
+  uint64_t uint64_value;
+  double double_value;
+  bool bool_value;
+  uint64_t pointer_value;
+} pftrace_arg_value_t;
+
+typedef struct {
+  pftrace_string_t key;
+  pftrace_arg_type_t type;
+  pftrace_arg_value_t value;
+} pftrace_arg_t;
+
+/* Direct event input for pftrace_write_event. `timestamp_clock_id` uses the
+ * Perfetto clock-id namespace; zero is the default/unspecified clock. A zero
+ * sequence ID is likewise omitted by the encoder. `counter_value` is used by
+ * counter events and ignored by other event types.
+ *
+ * Each pointer/count pair is valid when count is zero, or when pointer is
+ * non-NULL. Every referenced string uses pftrace_string_t's null/size rule.
+ * Writer borrows event, its arrays, and all strings only for duration of
+ * pftrace_write_event; it never retains caller pointers. */
+typedef struct {
+  uint64_t timestamp_ns;
+  uint32_t timestamp_clock_id;
+  uint32_t trusted_packet_sequence_id;
+  uint64_t track_uuid;
+  pftrace_track_event_type_t type;
+  pftrace_string_t name;
+  int64_t counter_value;
+  const uint64_t *flow_ids;
+  size_t flow_id_count;
+  const uint64_t *terminating_flow_ids;
+  size_t terminating_flow_id_count;
+  const pftrace_string_t *categories;
+  size_t category_count;
+  const pftrace_arg_t *arguments;
+  size_t argument_count;
+} pftrace_event_t;
+
 /* All mutations return PFTRACE_OK only after their promised mutation commits.
  * `data == NULL` is valid only with size zero. Empty byte strings are valid;
  * length-bearing inputs may contain embedded NUL bytes. Legacy `const char *`

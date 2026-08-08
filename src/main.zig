@@ -23,6 +23,54 @@ pub const pftrace_status_t = enum(c_int) {
 
 pub const pftrace_string_t = extern struct { data: ?[*]const u8, size: usize };
 pub const pftrace_write_fn = *const fn (?*anyopaque, ?[*]const u8, usize) callconv(.c) c_int;
+pub const pftrace_track_event_type_t = enum(c_int) {
+    unspecified = 0,
+    slice_begin = 1,
+    slice_end = 2,
+    instant = 3,
+    counter = 4,
+    _,
+};
+
+pub const pftrace_arg_type_t = enum(c_int) {
+    string = 0,
+    int64 = 1,
+    uint64 = 2,
+    double = 3,
+    bool = 4,
+    pointer = 5,
+    _,
+};
+pub const pftrace_arg_value_t = extern union {
+    string_value: pftrace_string_t,
+    int64_value: i64,
+    uint64_value: u64,
+    double_value: f64,
+    bool_value: bool,
+    pointer_value: u64,
+};
+pub const pftrace_arg_t = extern struct {
+    key: pftrace_string_t,
+    type: pftrace_arg_type_t,
+    value: pftrace_arg_value_t,
+};
+pub const pftrace_event_t = extern struct {
+    timestamp_ns: u64,
+    timestamp_clock_id: u32,
+    trusted_packet_sequence_id: u32,
+    track_uuid: u64,
+    type: pftrace_track_event_type_t,
+    name: pftrace_string_t,
+    counter_value: i64,
+    flow_ids: ?[*]const u64,
+    flow_id_count: usize,
+    terminating_flow_ids: ?[*]const u64,
+    terminating_flow_id_count: usize,
+    categories: ?[*]const pftrace_string_t,
+    category_count: usize,
+    arguments: ?[*]const pftrace_arg_t,
+    argument_count: usize,
+};
 
 pub const pftrace_writer_options_t = extern struct {
     struct_size: u32,
@@ -325,6 +373,50 @@ fn stringSlice(value: pftrace_string_t) ?[]const u8 {
     if (value.size == 0) return "";
     const data = value.data orelse return null;
     return data[0..value.size];
+}
+
+fn countedSpanValid(comptime T: type, data: ?[*]const T, count: usize) bool {
+    return count == 0 or data != null;
+}
+
+/// Validates all direct input before its future encoder starts a packet
+/// transaction. Kept separate from encoding so E5.S2 cannot accidentally
+/// expose a scratch prefix while discovering bad caller input.
+fn validateDirectEvent(writer: *const pftrace_writer_t, event: ?*const pftrace_event_t) pftrace_status_t {
+    const value = event orelse return .invalid_argument;
+    if (@intFromEnum(value.type) > @intFromEnum(pftrace_track_event_type_t.counter)) return .invalid_argument;
+    const name = stringSlice(value.name) orelse return .invalid_argument;
+    if (name.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
+    if (!countedSpanValid(u64, value.flow_ids, value.flow_id_count) or
+        !countedSpanValid(u64, value.terminating_flow_ids, value.terminating_flow_id_count) or
+        !countedSpanValid(pftrace_string_t, value.categories, value.category_count) or
+        !countedSpanValid(pftrace_arg_t, value.arguments, value.argument_count)) return .invalid_argument;
+    if (value.flow_id_count > writer.options.maximum_flow_ids or
+        value.terminating_flow_id_count > writer.options.maximum_terminating_flow_ids or
+        value.category_count > writer.options.maximum_categories or
+        value.argument_count > writer.options.maximum_arguments) return .capacity_exceeded;
+
+    if (value.categories) |categories| {
+        for (categories[0..value.category_count]) |category| {
+            const text = stringSlice(category) orelse return .invalid_argument;
+            if (text.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
+        }
+    }
+    if (value.arguments) |arguments| {
+        for (arguments[0..value.argument_count]) |argument| {
+            const key = stringSlice(argument.key) orelse return .invalid_argument;
+            if (key.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
+            switch (argument.type) {
+                .string => {
+                    const text = stringSlice(argument.value.string_value) orelse return .invalid_argument;
+                    if (text.len > writer.options.maximum_string_bytes) return .capacity_exceeded;
+                },
+                .int64, .uint64, .double, .bool, .pointer => {},
+                else => return .invalid_argument,
+            }
+        }
+    }
+    return .ok;
 }
 
 fn cString(ptr: ?[*]const u8) ?[]const u8 {
@@ -855,4 +947,63 @@ test "trace byte accounting rejects overflow" {
     writer.accepted_trace_bytes = std.math.maxInt(u64) - 1;
     try std.testing.expectEqual(pftrace_status_t.capacity_exceeded, writer.commitPacket(&.{ 1, 2 }));
     try std.testing.expectEqual(@as(usize, 0), writer.pb.written().len);
+}
+
+test "direct event validation rejects invalid input before scratch mutation" {
+    var output: [128]u8 = undefined;
+    var scratch: [128]u8 = undefined;
+    var writer = testWriter(&output, &scratch);
+    try writer.packet_pb.writeVarint(7);
+    const prefix = writer.packet_pb.written();
+
+    var event = pftrace_event_t{
+        .timestamp_ns = 1,
+        .timestamp_clock_id = 0,
+        .trusted_packet_sequence_id = 0,
+        .track_uuid = 2,
+        .type = .instant,
+        .name = .{ .data = "event".ptr, .size = 5 },
+        .counter_value = 0,
+        .flow_ids = null,
+        .flow_id_count = 0,
+        .terminating_flow_ids = null,
+        .terminating_flow_id_count = 0,
+        .categories = null,
+        .category_count = 0,
+        .arguments = null,
+        .argument_count = 0,
+    };
+    try std.testing.expectEqual(pftrace_status_t.ok, validateDirectEvent(&writer, &event));
+
+    event.flow_id_count = 1;
+    try std.testing.expectEqual(pftrace_status_t.invalid_argument, validateDirectEvent(&writer, &event));
+    event.flow_id_count = 0;
+    event.terminating_flow_id_count = 1;
+    try std.testing.expectEqual(pftrace_status_t.invalid_argument, validateDirectEvent(&writer, &event));
+    event.terminating_flow_id_count = 0;
+    event.category_count = 1;
+    try std.testing.expectEqual(pftrace_status_t.invalid_argument, validateDirectEvent(&writer, &event));
+    event.category_count = 0;
+    event.argument_count = 1;
+    try std.testing.expectEqual(pftrace_status_t.invalid_argument, validateDirectEvent(&writer, &event));
+    event.argument_count = 0;
+    event.type = @enumFromInt(99);
+    try std.testing.expectEqual(pftrace_status_t.invalid_argument, validateDirectEvent(&writer, &event));
+    event.type = .instant;
+    writer.options.maximum_categories = 0;
+    var categories = [_]pftrace_string_t{.{ .data = "category".ptr, .size = 8 }};
+    event.categories = &categories;
+    event.category_count = 1;
+    try std.testing.expectEqual(pftrace_status_t.capacity_exceeded, validateDirectEvent(&writer, &event));
+    writer.options.maximum_categories = default_collection_limit;
+    event.category_count = 0;
+    var args = [_]pftrace_arg_t{.{
+        .key = .{ .data = "key".ptr, .size = 3 },
+        .type = @enumFromInt(99),
+        .value = undefined,
+    }};
+    event.arguments = &args;
+    event.argument_count = 1;
+    try std.testing.expectEqual(pftrace_status_t.invalid_argument, validateDirectEvent(&writer, &event));
+    try std.testing.expectEqualSlices(u8, prefix, writer.packet_pb.written());
 }
