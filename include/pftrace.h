@@ -111,6 +111,22 @@ typedef struct {
   size_t argument_count;
 } pftrace_event_t;
 
+/* Common input for direct-event convenience calls. Timestamp is nanoseconds.
+ * Pointer/count pairs use the same rules as pftrace_event_t. Categories and
+ * unusual event combinations require direct pftrace_event_t construction. */
+typedef struct {
+  uint64_t timestamp_ns;
+  uint32_t timestamp_clock_id;
+  uint32_t trusted_packet_sequence_id;
+  uint64_t track_uuid;
+  const uint64_t *flow_ids;
+  size_t flow_id_count;
+  const uint64_t *terminating_flow_ids;
+  size_t terminating_flow_id_count;
+  const pftrace_arg_t *arguments;
+  size_t argument_count;
+} pftrace_event_common_t;
+
 /* All mutations return PFTRACE_OK only after their promised mutation commits.
  * `data == NULL` is valid only with size zero. Empty byte strings are valid;
  * length-bearing inputs may contain embedded NUL bytes. Legacy `const char *`
@@ -166,6 +182,21 @@ pftrace_status_t pftrace_finalize(pftrace_writer_t *writer);
  * batch unchanged. */
 pftrace_status_t pftrace_write_event(pftrace_writer_t *writer,
                                      const pftrace_event_t *event);
+/* Small direct-event convenience surface. Each call delegates to
+ * pftrace_write_event; construct pftrace_event_t directly for categories or
+ * combinations not represented here. */
+pftrace_status_t pftrace_write_slice_begin(
+    pftrace_writer_t *writer, const pftrace_event_common_t *common,
+    pftrace_string_t name);
+pftrace_status_t pftrace_write_slice_end(
+    pftrace_writer_t *writer, const pftrace_event_common_t *common,
+    pftrace_string_t name);
+pftrace_status_t pftrace_write_instant(
+    pftrace_writer_t *writer, const pftrace_event_common_t *common,
+    pftrace_string_t name);
+pftrace_status_t pftrace_write_counter(
+    pftrace_writer_t *writer, const pftrace_event_common_t *common,
+    pftrace_string_t name, int64_t value);
 
 pftrace_packet_t *pftrace_packet_begin(pftrace_writer_t *writer);
 pftrace_status_t pftrace_packet_end(pftrace_writer_t *writer, pftrace_packet_t *packet);

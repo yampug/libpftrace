@@ -71,6 +71,18 @@ pub const pftrace_event_t = extern struct {
     arguments: ?[*]const pftrace_arg_t,
     argument_count: usize,
 };
+pub const pftrace_event_common_t = extern struct {
+    timestamp_ns: u64,
+    timestamp_clock_id: u32,
+    trusted_packet_sequence_id: u32,
+    track_uuid: u64,
+    flow_ids: ?[*]const u64,
+    flow_id_count: usize,
+    terminating_flow_ids: ?[*]const u64,
+    terminating_flow_id_count: usize,
+    arguments: ?[*]const pftrace_arg_t,
+    argument_count: usize,
+};
 
 pub const pftrace_writer_options_t = extern struct {
     struct_size: u32,
@@ -615,6 +627,41 @@ export fn pftrace_write_event(writer: ?*pftrace_writer_t, event: ?*const pftrace
     const commit_status = w.commitPacket(w.packet_pb.written());
     w.packet_pb.reset();
     return commit_status;
+}
+
+fn writeConvenienceEvent(writer: ?*pftrace_writer_t, common: ?*const pftrace_event_common_t, name: pftrace_string_t, event_type: pftrace_track_event_type_t, counter_value: i64) pftrace_status_t {
+    const fields = common orelse return .invalid_argument;
+    const event = pftrace_event_t{
+        .timestamp_ns = fields.timestamp_ns,
+        .timestamp_clock_id = fields.timestamp_clock_id,
+        .trusted_packet_sequence_id = fields.trusted_packet_sequence_id,
+        .track_uuid = fields.track_uuid,
+        .type = event_type,
+        .name = name,
+        .counter_value = counter_value,
+        .flow_ids = fields.flow_ids,
+        .flow_id_count = fields.flow_id_count,
+        .terminating_flow_ids = fields.terminating_flow_ids,
+        .terminating_flow_id_count = fields.terminating_flow_id_count,
+        .categories = null,
+        .category_count = 0,
+        .arguments = fields.arguments,
+        .argument_count = fields.argument_count,
+    };
+    return pftrace_write_event(writer, &event);
+}
+
+export fn pftrace_write_slice_begin(writer: ?*pftrace_writer_t, common: ?*const pftrace_event_common_t, name: pftrace_string_t) pftrace_status_t {
+    return writeConvenienceEvent(writer, common, name, .slice_begin, 0);
+}
+export fn pftrace_write_slice_end(writer: ?*pftrace_writer_t, common: ?*const pftrace_event_common_t, name: pftrace_string_t) pftrace_status_t {
+    return writeConvenienceEvent(writer, common, name, .slice_end, 0);
+}
+export fn pftrace_write_instant(writer: ?*pftrace_writer_t, common: ?*const pftrace_event_common_t, name: pftrace_string_t) pftrace_status_t {
+    return writeConvenienceEvent(writer, common, name, .instant, 0);
+}
+export fn pftrace_write_counter(writer: ?*pftrace_writer_t, common: ?*const pftrace_event_common_t, name: pftrace_string_t, value: i64) pftrace_status_t {
+    return writeConvenienceEvent(writer, common, name, .counter, value);
 }
 
 export fn pftrace_packet_begin(writer: ?*pftrace_writer_t) ?*pftrace_packet_t {
@@ -1209,4 +1256,113 @@ test "direct event writes caller selected timestamp clock id" {
     };
     try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_event(&writer, &event));
     try std.testing.expect(std.mem.indexOf(u8, writer.pb.written(), &.{ 0xd0, 0x03, 0x07 }) != null);
+}
+
+test "convenience events match equivalent direct events" {
+    const flow_ids = [_]u64{3};
+    const terminating_flow_ids = [_]u64{4};
+    const arguments = [_]pftrace_arg_t{.{
+        .key = .{ .data = "arg".ptr, .size = 3 },
+        .type = .bool,
+        .value = .{ .bool_value = true },
+    }};
+    const common = pftrace_event_common_t{
+        .timestamp_ns = 9,
+        .timestamp_clock_id = 7,
+        .trusted_packet_sequence_id = 2,
+        .track_uuid = 5,
+        .flow_ids = &flow_ids,
+        .flow_id_count = flow_ids.len,
+        .terminating_flow_ids = &terminating_flow_ids,
+        .terminating_flow_id_count = terminating_flow_ids.len,
+        .arguments = &arguments,
+        .argument_count = arguments.len,
+    };
+    const cases = [_]struct { event_type: pftrace_track_event_type_t, counter_value: i64 }{
+        .{ .event_type = .slice_begin, .counter_value = 0 },
+        .{ .event_type = .slice_end, .counter_value = 0 },
+        .{ .event_type = .instant, .counter_value = 0 },
+        .{ .event_type = .counter, .counter_value = -1 },
+    };
+    for (cases) |case| {
+        var direct_output: [256]u8 = undefined;
+        var direct_scratch: [256]u8 = undefined;
+        var direct_writer = testWriter(&direct_output, &direct_scratch);
+        var convenience_output: [256]u8 = undefined;
+        var convenience_scratch: [256]u8 = undefined;
+        var convenience_writer = testWriter(&convenience_output, &convenience_scratch);
+        const name = pftrace_string_t{ .data = "event".ptr, .size = 5 };
+        const direct_event = pftrace_event_t{
+            .timestamp_ns = common.timestamp_ns,
+            .timestamp_clock_id = common.timestamp_clock_id,
+            .trusted_packet_sequence_id = common.trusted_packet_sequence_id,
+            .track_uuid = common.track_uuid,
+            .type = case.event_type,
+            .name = name,
+            .counter_value = case.counter_value,
+            .flow_ids = common.flow_ids,
+            .flow_id_count = common.flow_id_count,
+            .terminating_flow_ids = common.terminating_flow_ids,
+            .terminating_flow_id_count = common.terminating_flow_id_count,
+            .categories = null,
+            .category_count = 0,
+            .arguments = common.arguments,
+            .argument_count = common.argument_count,
+        };
+        try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_event(&direct_writer, &direct_event));
+        const status = switch (case.event_type) {
+            .slice_begin => pftrace_write_slice_begin(&convenience_writer, &common, name),
+            .slice_end => pftrace_write_slice_end(&convenience_writer, &common, name),
+            .instant => pftrace_write_instant(&convenience_writer, &common, name),
+            .counter => pftrace_write_counter(&convenience_writer, &common, name, case.counter_value),
+            else => unreachable,
+        };
+        try std.testing.expectEqual(pftrace_status_t.ok, status);
+        try std.testing.expectEqualSlices(u8, direct_writer.pb.written(), convenience_writer.pb.written());
+    }
+}
+
+test "convenience counter preserves signed boundaries" {
+    const common = pftrace_event_common_t{
+        .timestamp_ns = 1,
+        .timestamp_clock_id = 0,
+        .trusted_packet_sequence_id = 0,
+        .track_uuid = 2,
+        .flow_ids = null,
+        .flow_id_count = 0,
+        .terminating_flow_ids = null,
+        .terminating_flow_id_count = 0,
+        .arguments = null,
+        .argument_count = 0,
+    };
+    const values = [_]i64{ std.math.minInt(i64), -1, 0, std.math.maxInt(i64) };
+    for (values) |value| {
+        var direct_output: [128]u8 = undefined;
+        var direct_scratch: [128]u8 = undefined;
+        var direct_writer = testWriter(&direct_output, &direct_scratch);
+        var convenience_output: [128]u8 = undefined;
+        var convenience_scratch: [128]u8 = undefined;
+        var convenience_writer = testWriter(&convenience_output, &convenience_scratch);
+        const name = pftrace_string_t{ .data = "counter".ptr, .size = 7 };
+        const direct_event = pftrace_event_t{
+            .timestamp_ns = common.timestamp_ns,
+            .timestamp_clock_id = common.timestamp_clock_id,
+            .trusted_packet_sequence_id = common.trusted_packet_sequence_id,
+            .track_uuid = common.track_uuid,
+            .type = .counter,
+            .name = name,
+            .counter_value = value,
+            .flow_ids = null,
+            .flow_id_count = 0,
+            .terminating_flow_ids = null,
+            .terminating_flow_id_count = 0,
+            .categories = null,
+            .category_count = 0,
+            .arguments = null,
+            .argument_count = 0,
+        };
+        try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_event(&direct_writer, &direct_event));
+        try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_counter(&convenience_writer, &common, name, value));
+        try std.testing.expectEqualSlices(u8, direct_writer.pb.written(), convenience_writer.pb.written());
+    }
 }

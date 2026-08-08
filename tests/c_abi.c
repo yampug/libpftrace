@@ -43,6 +43,9 @@ int main(void) {
       UINT64_C(1), 0, 1, 2, PFTRACE_TRACK_EVENT_TYPE_INSTANT, {"event", 5}, 0,
       flow_ids, 1, terminating_flow_ids, 1, categories, 1, arguments,
       sizeof(arguments) / sizeof(arguments[0])};
+  const pftrace_event_common_t direct_common = {
+      UINT64_C(1), 0, 1, 2, flow_ids, 1, terminating_flow_ids, 1, arguments,
+      sizeof(arguments) / sizeof(arguments[0])};
   if (direct_event.arguments[5].type != PFTRACE_ARG_TYPE_POINTER) {
     return 1;
   }
@@ -163,6 +166,10 @@ int main(void) {
                                          &callback_writer) != PFTRACE_OK ||
       callback_writer == NULL ||
       pftrace_write_event(callback_writer, &direct_event) != PFTRACE_OK ||
+      pftrace_write_slice_begin(callback_writer, &direct_common, (pftrace_string_t){"begin", 5}) != PFTRACE_OK ||
+      pftrace_write_slice_end(callback_writer, &direct_common, (pftrace_string_t){"end", 3}) != PFTRACE_OK ||
+      pftrace_write_instant(callback_writer, &direct_common, (pftrace_string_t){"instant", 7}) != PFTRACE_OK ||
+      pftrace_write_counter(callback_writer, &direct_common, (pftrace_string_t){"counter", 7}, INT64_MIN) != PFTRACE_OK ||
       pftrace_write_clock_snapshot(callback_writer, UINT64_C(42)) != PFTRACE_OK ||
       pftrace_write_clock_snapshot(callback_writer, UINT64_C(43)) != PFTRACE_OK ||
       memory.calls != 0 || pftrace_flush(callback_writer) != PFTRACE_OK ||
