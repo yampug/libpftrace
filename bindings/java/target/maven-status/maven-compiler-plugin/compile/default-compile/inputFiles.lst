@@ -1,8 +1,0 @@
-/Users/bob/repos/libpftrace/bindings/java/src/main/java/io/github/libpftrace/Event.java
-/Users/bob/repos/libpftrace/bindings/java/src/main/java/io/github/libpftrace/EventType.java
-/Users/bob/repos/libpftrace/bindings/java/src/main/java/io/github/libpftrace/Pftrace.java
-/Users/bob/repos/libpftrace/bindings/java/src/main/java/io/github/libpftrace/PftraceException.java
-/Users/bob/repos/libpftrace/bindings/java/src/main/java/io/github/libpftrace/PftraceNative.java
-/Users/bob/repos/libpftrace/bindings/java/src/main/java/io/github/libpftrace/Status.java
-/Users/bob/repos/libpftrace/bindings/java/src/main/java/io/github/libpftrace/Trace.java
-/Users/bob/repos/libpftrace/bindings/java/src/main/java/io/github/libpftrace/WriterOptions.java

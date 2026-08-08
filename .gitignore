@@ -17,3 +17,6 @@ test_big_trace
 !LICENSE.md
 
 .zig-cache/
+
+# Java build output
+bindings/java/target/
