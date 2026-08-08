@@ -22,10 +22,27 @@ typedef enum {
 } pftrace_track_event_type_t;
 
 // --- Lifecycle ---
+//
+// Concurrency and ownership contract:
+// - A writer has exclusive single-thread ownership. Calls using the same writer
+//   must not overlap on more than one thread.
+// - Packet and track-event handles belong to the writer that created them. Do not
+//   pass a handle to another writer or use it after its matching end call.
+// - Independent writers may be used concurrently.
+// - End every active track event and packet before pftrace_destroy. Construction
+//   must have stopped before lifecycle teardown begins.
+//
+// libpftrace does not own application scheduling: it creates no worker thread,
+// queue, or implicit synchronization. Writes performed by this API are synchronous
+// and can block; callers requiring realtime isolation should use their own drain
+// thread. Invalid handles or violations of this contract are unsupported; no
+// use-after-free detection is promised.
 pftrace_writer_t *pftrace_init(const char *file_path);
 void pftrace_destroy(pftrace_writer_t *w);
 
 // --- Packet Lifecycle ---
+// A packet returned by pftrace_packet_begin belongs to w. Pass the same w to
+// pftrace_packet_end, and end every track event begun from packet first.
 pftrace_packet_t *pftrace_packet_begin(pftrace_writer_t *w);
 void pftrace_packet_end(pftrace_writer_t *w, pftrace_packet_t *packet);
 
@@ -43,6 +60,8 @@ void pftrace_write_thread_track_descriptor(pftrace_writer_t *w, uint64_t uuid,
 void pftrace_write_clock_snapshot(pftrace_writer_t *w, uint64_t boottime_ns);
 
 // --- Track Events ---
+// A track event belongs to the writer that owns p. It must end before p ends and
+// must not be used after pftrace_track_event_end returns.
 pftrace_track_event_t *pftrace_packet_begin_track_event(pftrace_packet_t *p);
 void pftrace_track_event_end(pftrace_track_event_t *te);
 
