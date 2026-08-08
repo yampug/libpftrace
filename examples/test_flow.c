@@ -14,12 +14,13 @@ int main() {
   pftrace_write_thread_track_descriptor(w, 101, 100, 5000, 5001, "MainThread");
 
   // Sync Clocks
-  pftrace_write_clock_snapshot(w, 10000); // 10000 ns boottime
+  pftrace_write_linux_boottime_clock_snapshot(w, 10000); // 10000 ns boottime
 
   // Flow source
   {
     pftrace_packet_t *p = pftrace_packet_begin(w);
     pftrace_packet_set_timestamp(p, 10000);
+    pftrace_packet_set_timestamp_clock_id(p, PFTRACE_CLOCK_ID_LINUX_BOOTTIME);
 
     pftrace_track_event_t *te = pftrace_packet_begin_track_event(p);
     pftrace_track_event_set_type(te, PFTRACE_TRACK_EVENT_TYPE_SLICE_BEGIN);
@@ -35,6 +36,7 @@ int main() {
   {
     pftrace_packet_t *p = pftrace_packet_begin(w);
     pftrace_packet_set_timestamp(p, 20000);
+    pftrace_packet_set_timestamp_clock_id(p, PFTRACE_CLOCK_ID_LINUX_BOOTTIME);
 
     pftrace_track_event_t *te = pftrace_packet_begin_track_event(p);
     pftrace_track_event_set_type(te, PFTRACE_TRACK_EVENT_TYPE_SLICE_BEGIN);

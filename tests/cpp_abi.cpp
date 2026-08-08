@@ -41,6 +41,7 @@ int main() {
   }
 
   pftrace_packet_set_timestamp(packet, UINT64_C(1));
+  pftrace_packet_set_timestamp_clock_id(packet, PFTRACE_CLOCK_ID_CUSTOM_FIRST);
   pftrace_packet_set_trusted_packet_sequence_id(packet, UINT32_C(1));
   pftrace_packet_end(writer, packet);
   pftrace_destroy(writer);

@@ -14,6 +14,7 @@ void simulate_work(int depth, int max_depth) {
 
   pftrace_packet_t *p = pftrace_packet_begin(g_writer);
   pftrace_packet_set_timestamp(p, g_timestamp);
+  pftrace_packet_set_timestamp_clock_id(p, PFTRACE_CLOCK_ID_CUSTOM_FIRST);
   pftrace_packet_set_trusted_packet_sequence_id(p, 1);
 
   pftrace_track_event_t *te = pftrace_packet_begin_track_event(p);
@@ -40,6 +41,7 @@ void simulate_work(int depth, int max_depth) {
   // End Slice
   p = pftrace_packet_begin(g_writer);
   pftrace_packet_set_timestamp(p, g_timestamp);
+  pftrace_packet_set_timestamp_clock_id(p, PFTRACE_CLOCK_ID_CUSTOM_FIRST);
   pftrace_packet_set_trusted_packet_sequence_id(p, 1);
 
   te = pftrace_packet_begin_track_event(p);
@@ -57,7 +59,7 @@ int main() {
     return 1;
 
   // Metadata
-  pftrace_write_clock_snapshot(g_writer, g_timestamp);
+  pftrace_write_clock_snapshot(g_writer, PFTRACE_CLOCK_ID_CUSTOM_FIRST, g_timestamp);
   pftrace_write_process_track_descriptor(g_writer, 100, 1234,
                                          "StressTestProcess");
   pftrace_write_thread_track_descriptor(g_writer, 101, 100, 1234, 5678,
@@ -74,6 +76,7 @@ int main() {
     // Wrap each iteration in a "loop" slice
     pftrace_packet_t *p = pftrace_packet_begin(g_writer);
     pftrace_packet_set_timestamp(p, g_timestamp);
+    pftrace_packet_set_timestamp_clock_id(p, PFTRACE_CLOCK_ID_CUSTOM_FIRST);
     pftrace_packet_set_trusted_packet_sequence_id(p, 1);
 
     pftrace_track_event_t *te = pftrace_packet_begin_track_event(p);
@@ -94,6 +97,7 @@ int main() {
     // End Loop slice
     p = pftrace_packet_begin(g_writer);
     pftrace_packet_set_timestamp(p, g_timestamp);
+    pftrace_packet_set_timestamp_clock_id(p, PFTRACE_CLOCK_ID_CUSTOM_FIRST);
     pftrace_track_event_t *te_end = pftrace_packet_begin_track_event(p);
     pftrace_track_event_set_type(te_end, PFTRACE_TRACK_EVENT_TYPE_SLICE_END);
     pftrace_track_event_set_track_uuid(te_end, 101);

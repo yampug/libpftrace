@@ -42,13 +42,14 @@ int main() {
     if (!w) return 1;
 
     // 1. Metadata
-    pftrace_write_clock_snapshot(w, 1000000000);
+    pftrace_write_linux_boottime_clock_snapshot(w, 1000000000);
     pftrace_write_process_track_descriptor(w, 100, 1234, "MyApp");
     pftrace_write_thread_track_descriptor(w, 101, 100, 1234, 5678, "Worker");
 
     // 2. Events
     pftrace_packet_t* p = pftrace_packet_begin(w);
     pftrace_packet_set_timestamp(p, 1000000500);
+    pftrace_packet_set_timestamp_clock_id(p, PFTRACE_CLOCK_ID_LINUX_BOOTTIME);
     
     pftrace_track_event_t* te = pftrace_packet_begin_track_event(p);
     pftrace_track_event_set_type(te, PFTRACE_TRACK_EVENT_TYPE_SLICE_BEGIN);
@@ -73,6 +74,21 @@ int main() {
 ## Examples
 
 Check the `examples/` directory for full test programs.
+
+## Clocks
+
+All timestamps are nanoseconds. `pftrace_write_clock_snapshot` accepts a
+caller-selected Perfetto clock ID and timestamp; use built-in Perfetto IDs only
+for their documented clock domains. `PFTRACE_CLOCK_ID_LINUX_BOOTTIME` (6) is
+Linux `CLOCK_BOOTTIME` only. Use
+`pftrace_write_linux_boottime_clock_snapshot` only for that source; do not map
+macOS or another platform's arbitrary monotonic clock to ID 6.
+
+Application-defined clocks start at `PFTRACE_CLOCK_ID_CUSTOM_FIRST` (64). Set
+the matching packet ID with `pftrace_packet_set_timestamp_clock_id` or the
+direct event's `timestamp_clock_id`. Application-defined clock IDs are
+process-local unless application supplies its own correlation; libpftrace does
+not synchronize clocks across processes or machines.
 
 ## License
 

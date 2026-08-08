@@ -112,6 +112,7 @@ int main(void) {
   }
 
   if (pftrace_packet_set_timestamp(packet, UINT64_C(1)) != PFTRACE_OK ||
+      pftrace_packet_set_timestamp_clock_id(packet, PFTRACE_CLOCK_ID_CUSTOM_FIRST) != PFTRACE_OK ||
       pftrace_packet_set_trusted_packet_sequence_id(packet, UINT32_C(1)) != PFTRACE_OK ||
       pftrace_packet_end(writer, packet) != PFTRACE_OK ||
       pftrace_packet_set_timestamp(packet, UINT64_C(2)) != PFTRACE_INVALID_STATE ||
@@ -170,14 +171,16 @@ int main(void) {
       pftrace_write_slice_end(callback_writer, &direct_common, (pftrace_string_t){"end", 3}) != PFTRACE_OK ||
       pftrace_write_instant(callback_writer, &direct_common, (pftrace_string_t){"instant", 7}) != PFTRACE_OK ||
       pftrace_write_counter(callback_writer, &direct_common, (pftrace_string_t){"counter", 7}, INT64_MIN) != PFTRACE_OK ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(42)) != PFTRACE_OK ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(43)) != PFTRACE_OK ||
+      pftrace_write_clock_snapshot(callback_writer, PFTRACE_CLOCK_ID_UNSPECIFIED,
+                                   UINT64_C(42)) != PFTRACE_OK ||
+      pftrace_write_clock_snapshot(callback_writer, PFTRACE_CLOCK_ID_CUSTOM_FIRST,
+                                   UINT64_C(43)) != PFTRACE_OK ||
       memory.calls != 0 || pftrace_flush(callback_writer) != PFTRACE_OK ||
       memory.calls != 1 || memory.bytes == 0 ||
       pftrace_flush(callback_writer) != PFTRACE_OK || memory.calls != 1 ||
       pftrace_finalize(callback_writer) != PFTRACE_OK ||
       pftrace_finalize(callback_writer) != PFTRACE_OK ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(44)) != PFTRACE_INVALID_STATE ||
+      pftrace_write_linux_boottime_clock_snapshot(callback_writer, UINT64_C(44)) != PFTRACE_INVALID_STATE ||
       pftrace_destroy(callback_writer) != PFTRACE_OK) {
     return 1;
   }
@@ -186,10 +189,10 @@ int main(void) {
   callback_writer = NULL;
   if (pftrace_init_callback_with_options(capture_write, &failing, NULL,
                                          &callback_writer) != PFTRACE_OK ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(1)) != PFTRACE_OK ||
+      pftrace_write_linux_boottime_clock_snapshot(callback_writer, UINT64_C(1)) != PFTRACE_OK ||
       pftrace_finalize(callback_writer) != PFTRACE_IO_ERROR ||
       failing.calls != 1 || pftrace_writer_status(callback_writer) != PFTRACE_IO_ERROR ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(2)) != PFTRACE_IO_ERROR ||
+      pftrace_write_linux_boottime_clock_snapshot(callback_writer, UINT64_C(2)) != PFTRACE_IO_ERROR ||
       failing.calls != 1 || pftrace_destroy(callback_writer) != PFTRACE_IO_ERROR) {
     return 1;
   }
@@ -198,7 +201,7 @@ int main(void) {
   callback_writer = NULL;
   if (borrowed == NULL ||
       pftrace_init_fd_with_options(fileno(borrowed), NULL, &callback_writer) != PFTRACE_OK ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(3)) != PFTRACE_OK ||
+      pftrace_write_linux_boottime_clock_snapshot(callback_writer, UINT64_C(3)) != PFTRACE_OK ||
       pftrace_finalize(callback_writer) != PFTRACE_OK ||
       pftrace_destroy(callback_writer) != PFTRACE_OK ||
       fputs("still-open", borrowed) < 0 || fclose(borrowed) != 0) {
@@ -239,8 +242,8 @@ int main(void) {
   callback_writer = NULL;
   if (pftrace_init_callback_with_options(capture_write, &memory, &options,
                                          &callback_writer) != PFTRACE_OK ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(4)) != PFTRACE_OK ||
-      pftrace_write_clock_snapshot(callback_writer, UINT64_C(5)) != PFTRACE_OK ||
+      pftrace_write_linux_boottime_clock_snapshot(callback_writer, UINT64_C(4)) != PFTRACE_OK ||
+      pftrace_write_linux_boottime_clock_snapshot(callback_writer, UINT64_C(5)) != PFTRACE_OK ||
       memory.calls != 2 || pftrace_destroy(callback_writer) != PFTRACE_OK) {
     return 1;
   }

@@ -35,8 +35,12 @@ module Pftrace
       LibPftrace.write_thread_track_descriptor(@writer, uuid, parent_uuid, pid, tid, name)
     end
 
-    def write_clock_snapshot(boottime_ns : UInt64)
-      LibPftrace.write_clock_snapshot(@writer, boottime_ns)
+    def write_clock_snapshot(clock_id : UInt32, timestamp_ns : UInt64)
+      LibPftrace.write_clock_snapshot(@writer, clock_id, timestamp_ns)
+    end
+
+    def write_linux_boottime_clock_snapshot(boottime_ns : UInt64)
+      LibPftrace.write_linux_boottime_clock_snapshot(@writer, boottime_ns)
     end
 
     # Event Tracing

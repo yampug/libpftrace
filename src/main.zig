@@ -6,6 +6,7 @@ const sink = @import("sink.zig");
 const allocator = std.heap.page_allocator;
 const default_packet_capacity = 1024 * 1024;
 const default_collection_limit = 1024;
+const linux_boottime_clock_id: u32 = 6;
 
 /// This limit applies only to legacy NUL-terminated convenience APIs. Length
 /// bearing APIs accept a supplied length and do not scan their input.
@@ -335,12 +336,12 @@ fn encodeThread(pb: *proto.PbWriter, uuid: u64, parent_uuid: u64, pid: i32, tid:
     try pb.endNested(descriptor);
     try pb.endNested(packet);
 }
-fn encodeClockSnapshot(pb: *proto.PbWriter, boottime_ns: u64) proto.Error!void {
+fn encodeClockSnapshot(pb: *proto.PbWriter, clock_id: u32, timestamp_ns: u64) proto.Error!void {
     const packet = try pb.beginNested(1);
     const snapshot = try pb.beginNested(schema.TracePacket.CLOCK_SNAPSHOT);
     const clock = try pb.beginNested(schema.ClockSnapshot.CLOCKS);
-    try pb.writeInt(schema.Clock.CLOCK_ID, 6);
-    try pb.writeInt(schema.Clock.TIMESTAMP, boottime_ns);
+    try pb.writeInt(schema.Clock.CLOCK_ID, clock_id);
+    try pb.writeInt(schema.Clock.TIMESTAMP, timestamp_ns);
     try pb.endNested(clock);
     try pb.endNested(snapshot);
     try pb.endNested(packet);
@@ -722,6 +723,12 @@ export fn pftrace_packet_set_timestamp(packet: ?*pftrace_packet_t, value: u64) p
     if (p.first_error != .ok) return p.first_error;
     return packetMutation(p, p.writer.packet_pb.writeInt(schema.TracePacket.TIMESTAMP, value));
 }
+export fn pftrace_packet_set_timestamp_clock_id(packet: ?*pftrace_packet_t, value: u32) pftrace_status_t {
+    const p = packetValid(packet) orelse return .invalid_state;
+    if (p.first_error != .ok) return p.first_error;
+    if (value == 0) return .ok;
+    return packetMutation(p, p.writer.packet_pb.writeInt(schema.TracePacket.TIMESTAMP_CLOCK_ID, value));
+}
 export fn pftrace_packet_set_trusted_packet_sequence_id(packet: ?*pftrace_packet_t, value: u32) pftrace_status_t {
     const p = packetValid(packet) orelse return .invalid_state;
     if (p.first_error != .ok) return p.first_error;
@@ -776,12 +783,12 @@ export fn pftrace_write_thread_track_descriptor(writer: ?*pftrace_writer_t, uuid
     return pftrace_write_thread_track_descriptor_string(writer, uuid, parent_uuid, pid, tid, stringArg(name) orelse return .invalid_argument);
 }
 
-export fn pftrace_write_clock_snapshot(writer: ?*pftrace_writer_t, boottime_ns: u64) pftrace_status_t {
+export fn pftrace_write_clock_snapshot(writer: ?*pftrace_writer_t, clock_id: u32, timestamp_ns: u64) pftrace_status_t {
     const w = writer orelse return .invalid_argument;
     if (w.terminal_status != .ok) return w.terminal_status;
     if (w.finalized) return .invalid_state;
     w.packet_pb.reset();
-    const result = encodeClockSnapshot(&w.packet_pb, boottime_ns);
+    const result = encodeClockSnapshot(&w.packet_pb, clock_id, timestamp_ns);
     const status = mutationStatus(w, result);
     if (status != .ok) {
         w.packet_pb.reset();
@@ -790,6 +797,9 @@ export fn pftrace_write_clock_snapshot(writer: ?*pftrace_writer_t, boottime_ns: 
     const commit_status = w.commitPacket(w.packet_pb.written());
     w.packet_pb.reset();
     return commit_status;
+}
+export fn pftrace_write_linux_boottime_clock_snapshot(writer: ?*pftrace_writer_t, boottime_ns: u64) pftrace_status_t {
+    return pftrace_write_clock_snapshot(writer, linux_boottime_clock_id, boottime_ns);
 }
 
 export fn pftrace_packet_begin_track_event(packet: ?*pftrace_packet_t) ?*pftrace_track_event_t {
@@ -1256,6 +1266,39 @@ test "direct event writes caller selected timestamp clock id" {
     };
     try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_event(&writer, &event));
     try std.testing.expect(std.mem.indexOf(u8, writer.pb.written(), &.{ 0xd0, 0x03, 0x07 }) != null);
+}
+
+test "clock snapshots preserve unspecified built-in and custom IDs" {
+    const cases = [_]struct { clock_id: u32, expected: []const u8 }{
+        .{ .clock_id = 0, .expected = &.{ 0x0a, 0x08, 0x32, 0x06, 0x0a, 0x04, 0x08, 0x00, 0x10, 0x01 } },
+        .{ .clock_id = linux_boottime_clock_id, .expected = &.{ 0x0a, 0x08, 0x32, 0x06, 0x0a, 0x04, 0x08, 0x06, 0x10, 0x01 } },
+        .{ .clock_id = 64, .expected = &.{ 0x0a, 0x08, 0x32, 0x06, 0x0a, 0x04, 0x08, 0x40, 0x10, 0x01 } },
+    };
+    for (cases) |case| {
+        var output: [128]u8 = undefined;
+        var scratch: [128]u8 = undefined;
+        var writer = testWriter(&output, &scratch);
+        try std.testing.expectEqual(pftrace_status_t.ok, pftrace_write_clock_snapshot(&writer, case.clock_id, 1));
+        try std.testing.expectEqualSlices(u8, case.expected, writer.pb.written());
+    }
+}
+
+test "builder packet timestamp clock id matches direct encoding" {
+    var builder_output: [128]u8 = undefined;
+    var builder_scratch: [128]u8 = undefined;
+    var builder_writer = testWriter(&builder_output, &builder_scratch);
+    const packet = pftrace_packet_begin(&builder_writer).?;
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_packet_set_timestamp_clock_id(packet, 64));
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_packet_commit(packet));
+    try std.testing.expectEqualSlices(u8, &.{ 0x0a, 0x03, 0xd0, 0x03, 0x40 }, builder_writer.pb.written());
+
+    var zero_output: [128]u8 = undefined;
+    var zero_scratch: [128]u8 = undefined;
+    var zero_writer = testWriter(&zero_output, &zero_scratch);
+    const zero_packet = pftrace_packet_begin(&zero_writer).?;
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_packet_set_timestamp_clock_id(zero_packet, 0));
+    try std.testing.expectEqual(pftrace_status_t.ok, pftrace_packet_commit(zero_packet));
+    try std.testing.expectEqualSlices(u8, &.{ 0x0a, 0x00 }, zero_writer.pb.written());
 }
 
 test "convenience events match equivalent direct events" {

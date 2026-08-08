@@ -36,7 +36,8 @@ lib LibPftrace
   # --- Domain Objects ---
   fun write_process_track_descriptor = pftrace_write_process_track_descriptor(w : Writer, uuid : UInt64, pid : Int32, name : LibC::Char*) : Status
   fun write_thread_track_descriptor = pftrace_write_thread_track_descriptor(w : Writer, uuid : UInt64, parent_uuid : UInt64, pid : Int32, tid : Int32, name : LibC::Char*) : Status
-  fun write_clock_snapshot = pftrace_write_clock_snapshot(w : Writer, boottime_ns : UInt64) : Status
+  fun write_clock_snapshot = pftrace_write_clock_snapshot(w : Writer, clock_id : UInt32, timestamp_ns : UInt64) : Status
+  fun write_linux_boottime_clock_snapshot = pftrace_write_linux_boottime_clock_snapshot(w : Writer, boottime_ns : UInt64) : Status
 
   # --- Track Events ---
   fun packet_begin_track_event = pftrace_packet_begin_track_event(p : Packet) : TrackEvent

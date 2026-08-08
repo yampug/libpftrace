@@ -7,7 +7,7 @@ describe Pftrace do
     File.delete(filename) if File.exists?(filename)
 
     Pftrace.open(filename) do |ctx|
-      ctx.write_clock_snapshot(1_000_000_000)
+      ctx.write_linux_boottime_clock_snapshot(1_000_000_000)
       ctx.write_process_descriptor(100, "CrystalApp")
       ctx.write_thread_descriptor(100, 101, "MainFiber")
 

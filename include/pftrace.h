@@ -60,6 +60,14 @@ typedef enum {
   PFTRACE_TRACK_EVENT_TYPE_COUNTER = 4,
 } pftrace_track_event_type_t;
 
+/* Perfetto clock IDs. Zero leaves packet clock unspecified; 6 is Linux
+ * CLOCK_BOOTTIME. Application-defined clock IDs start at 64. */
+enum {
+  PFTRACE_CLOCK_ID_UNSPECIFIED = 0,
+  PFTRACE_CLOCK_ID_LINUX_BOOTTIME = 6,
+  PFTRACE_CLOCK_ID_CUSTOM_FIRST = 64,
+};
+
 /* Direct-event argument tag and payload. `key` and string values follow the
  * pftrace_string_t null/size rule. Pointer values are represented as integers;
  * libpftrace never dereferences them. */
@@ -84,10 +92,12 @@ typedef struct {
   pftrace_arg_value_t value;
 } pftrace_arg_t;
 
-/* Direct event input for pftrace_write_event. `timestamp_clock_id` uses the
- * Perfetto clock-id namespace; zero is the default/unspecified clock. A zero
- * sequence ID is likewise omitted by the encoder. `counter_value` is used by
- * counter events and ignored by other event types.
+/* Direct event input for pftrace_write_event. Timestamp values are nanoseconds.
+ * `timestamp_clock_id` uses Perfetto's clock-id namespace: zero is
+ * unspecified, 6 is Linux CLOCK_BOOTTIME, and application-defined IDs start
+ * at 64. libpftrace does not synchronize clocks between processes or machines.
+ * A zero sequence ID is omitted by encoder. `counter_value` is used by counter
+ * events and ignored by other event types.
  *
  * Each pointer/count pair is valid when count is zero, or when pointer is
  * non-NULL. Every referenced string uses pftrace_string_t's null/size rule.
@@ -202,13 +212,26 @@ pftrace_packet_t *pftrace_packet_begin(pftrace_writer_t *writer);
 pftrace_status_t pftrace_packet_end(pftrace_writer_t *writer, pftrace_packet_t *packet);
 pftrace_status_t pftrace_packet_commit(pftrace_packet_t *packet);
 pftrace_status_t pftrace_packet_set_timestamp(pftrace_packet_t *packet, uint64_t timestamp_ns);
+/* Selects a Perfetto timestamp clock ID for this packet; zero leaves it
+ * unspecified. Timestamp units are nanoseconds. */
+pftrace_status_t pftrace_packet_set_timestamp_clock_id(pftrace_packet_t *packet,
+                                                        uint32_t clock_id);
 pftrace_status_t pftrace_packet_set_trusted_packet_sequence_id(pftrace_packet_t *packet, uint32_t seq_id);
 
 pftrace_status_t pftrace_write_process_track_descriptor_string(pftrace_writer_t *, uint64_t, int32_t, pftrace_string_t);
 pftrace_status_t pftrace_write_process_track_descriptor(pftrace_writer_t *, uint64_t, int32_t, const char *);
 pftrace_status_t pftrace_write_thread_track_descriptor_string(pftrace_writer_t *, uint64_t, uint64_t, int32_t, int32_t, pftrace_string_t);
 pftrace_status_t pftrace_write_thread_track_descriptor(pftrace_writer_t *, uint64_t, uint64_t, int32_t, int32_t, const char *);
-pftrace_status_t pftrace_write_clock_snapshot(pftrace_writer_t *, uint64_t);
+/* Emits one nanosecond clock snapshot. Built-in IDs follow Perfetto's clock
+ * namespace; application-defined IDs must be at least
+ * PFTRACE_CLOCK_ID_CUSTOM_FIRST. libpftrace preserves identity only and does
+ * not synchronize clocks. */
+pftrace_status_t pftrace_write_clock_snapshot(pftrace_writer_t *, uint32_t clock_id,
+                                              uint64_t timestamp_ns);
+/* Linux-only CLOCK_BOOTTIME convenience wrapper (Perfetto clock ID 6). Do not
+ * pass arbitrary platform monotonic clocks to this wrapper. */
+pftrace_status_t pftrace_write_linux_boottime_clock_snapshot(pftrace_writer_t *,
+                                                              uint64_t boottime_ns);
 
 pftrace_track_event_t *pftrace_packet_begin_track_event(pftrace_packet_t *packet);
 pftrace_status_t pftrace_track_event_end(pftrace_track_event_t *event);
