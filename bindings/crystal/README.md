@@ -33,13 +33,45 @@ Pftrace.open("trace.pftrace") do |ctx|
   ctx.write_thread_descriptor(100, 101, "Worker")
 
   # Tracing
-  ctx.trace("MyEvent", type: :slice_begin) do |ev|
+  ctx.trace("MyEvent", type: Pftrace::EventType::SliceBegin) do |ev|
     ev.arg("key", "value")
     ev.arg("counter", 123)
   end
   # ... work ...
   ctx.trace("MyEvent", type: :slice_end)
 end
+```
+
+Every C status is checked by the high-level API. Failures raise
+`Pftrace::Error`, whose `status` is the original `LibPftrace::Status` value.
+`Trace#finalize` flushes and seals the writer; `Trace#close` releases it.
+`Pftrace.open` performs both in that order. Event wrappers are invalidated when
+their block ends and raise `PFTRACE_INVALID_STATE` if reused.
+
+For bounded writers, initialize options before changing them:
+
+```crystal
+options = Pftrace::Trace.default_options
+options.packet_scratch_capacity = 64 * 1024
+options.output_batch_capacity = 64 * 1024
+options.maximum_packet_bytes = 64 * 1024
+
+Pftrace.open("trace.pftrace", options) do |trace|
+  trace.write_clock_snapshot(LibPftrace::CLOCK_ID_CUSTOM_FIRST, 1_000)
+end
+```
+
+`LibPftrace` mirrors public status, string, options, callback-sink, direct-event,
+argument, clock, and lifecycle ABI types. C calls borrow Crystal strings and
+direct-event arrays only for their synchronous duration; do not retain such
+pointers in callbacks after the call returns. Callback contexts remain owned by
+the Crystal caller for the writer lifetime.
+
+Run binding specs after building root static library:
+
+```bash
+zig build
+crystal spec bindings/crystal/spec
 ```
 
 ## Internal Details

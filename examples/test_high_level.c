@@ -1,54 +1,45 @@
 #include "pftrace.h"
 #include <stdio.h>
 
-int main() {
-  printf("Initializing Domain Specific Trace...\n");
-  pftrace_writer_t *w = pftrace_init("domain.pftrace");
-  if (!w) {
-    printf("Failed to init\n");
-    return 1;
-  }
+static int check(pftrace_status_t status, const char *operation) {
+  if (status == PFTRACE_OK) return 0;
+  fprintf(stderr, "%s: %s\n", operation, pftrace_status_string(status));
+  return 1;
+}
 
-  // 1. Metadata: Define Process and Thread
-  // Process UUID 100, PID 5000, Name "Renderer"
-  pftrace_write_process_track_descriptor(w, 100, 5000, "Renderer");
+int main(void) {
+  pftrace_writer_t *writer = NULL;
+  pftrace_writer_options_t options;
+  const pftrace_string_t name = { .data = "DrawFrame", .size = 9 };
+  const pftrace_arg_t arguments[] = {{
+      .key = { .data = "frame", .size = 5 },
+      .type = PFTRACE_ARG_TYPE_UINT64,
+      .value.uint64_value = 1,
+  }};
+  const pftrace_event_t begin = {
+      .timestamp_ns = 10000,
+      .timestamp_clock_id = PFTRACE_CLOCK_ID_CUSTOM_FIRST,
+      .trusted_packet_sequence_id = 42,
+      .track_uuid = 101,
+      .type = PFTRACE_TRACK_EVENT_TYPE_SLICE_BEGIN,
+      .name = name,
+      .arguments = arguments,
+      .argument_count = 1,
+  };
+  pftrace_event_t end = begin;
+  end.timestamp_ns = 20000;
+  end.type = PFTRACE_TRACK_EVENT_TYPE_SLICE_END;
+  end.arguments = NULL;
+  end.argument_count = 0;
 
-  // Thread UUID 101, PID 5000, TID 5001, Name "MainThread", Parent Process 100
-  pftrace_write_thread_track_descriptor(w, 101, 100, 5000, 5001, "MainThread");
-
-  // 2. Slice on Thread 101
-  {
-    pftrace_packet_t *p = pftrace_packet_begin(w);
-    pftrace_packet_set_timestamp(p, 10000);
-    pftrace_packet_set_trusted_packet_sequence_id(p, 42);
-
-    pftrace_track_event_t *te = pftrace_packet_begin_track_event(p);
-    pftrace_track_event_set_type(te, PFTRACE_TRACK_EVENT_TYPE_SLICE_BEGIN);
-    pftrace_track_event_set_track_uuid(te, 101); // Refers to Thread 101
-    pftrace_track_event_set_name(te, "DrawFrame");
-
-    // Log message associated with this event
-    pftrace_track_event_set_log_message(te, "Start drawing now");
-
-    pftrace_track_event_end(te);
-    pftrace_packet_end(w, p);
-  }
-
-  // 3. Slice End
-  {
-    pftrace_packet_t *p = pftrace_packet_begin(w);
-    pftrace_packet_set_timestamp(p, 20000);
-    pftrace_packet_set_trusted_packet_sequence_id(p, 42);
-
-    pftrace_track_event_t *te = pftrace_packet_begin_track_event(p);
-    pftrace_track_event_set_type(te, PFTRACE_TRACK_EVENT_TYPE_SLICE_END);
-    pftrace_track_event_set_track_uuid(te, 101);
-
-    pftrace_track_event_end(te);
-    pftrace_packet_end(w, p);
-  }
-
-  pftrace_destroy(w);
-  printf("Done. Output: domain.pftrace\n");
+  if (check(pftrace_writer_options_init(&options), "options init") ||
+      check(pftrace_init_path_with_options("domain.pftrace", &options, &writer), "path init") ||
+      check(pftrace_write_clock_snapshot(writer, PFTRACE_CLOCK_ID_CUSTOM_FIRST, 10000), "clock snapshot") ||
+      check(pftrace_write_process_track_descriptor(writer, 100, 5000, "Renderer"), "process descriptor") ||
+      check(pftrace_write_thread_track_descriptor(writer, 101, 100, 5000, 5001, "MainThread"), "thread descriptor") ||
+      check(pftrace_write_event(writer, &begin), "slice begin") ||
+      check(pftrace_write_event(writer, &end), "slice end") ||
+      check(pftrace_finalize(writer), "finalize") ||
+      check(pftrace_destroy(writer), "destroy")) return 1;
   return 0;
 }

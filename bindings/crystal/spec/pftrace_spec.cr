@@ -28,6 +28,50 @@ describe Pftrace do
 
     File.exists?(filename).should be_true
     File.size(filename).should be > 0
-    puts "Generated #{filename} (#{File.size(filename)} bytes) with all features verified."
+  end
+
+  it "preserves status in invalid-input and capacity errors" do
+    expect_raises(Pftrace::Error) { Pftrace::Trace.new("") }.status.should eq(LibPftrace::Status::InvalidArgument)
+
+    options = Pftrace::Trace.default_options
+    options.packet_scratch_capacity = 64
+    options.output_batch_capacity = 64
+    options.maximum_packet_bytes = 64
+    trace = Pftrace::Trace.new("crystal_capacity.pftrace", options)
+    begin
+      error = expect_raises(Pftrace::Error) do
+        trace.trace("x" * 128) { |_| }
+      end
+      error.status.should eq(LibPftrace::Status::CapacityExceeded)
+    ensure
+      trace.close
+    end
+  end
+
+  it "reports idempotent finalize and rejects mutation after finalization" do
+    trace = Pftrace::Trace.new("crystal_finalize.pftrace")
+    begin
+      trace.finalize
+      trace.finalize
+      error = expect_raises(Pftrace::Error) { trace.write_process_descriptor(1, "after-finalize") }
+      error.status.should eq(LibPftrace::Status::InvalidState)
+    ensure
+      trace.close
+    end
+  end
+
+  it "returns sticky io status from failing callback sink" do
+    options = Pftrace::Trace.default_options
+    options.flush_each_packet = true
+    writer = Pointer(Void).null.as(LibPftrace::Writer)
+    failing_sink = ->(context : Void*, bytes : UInt8*, size : LibC::SizeT) { LibPftrace::Status::IoError }
+    LibPftrace.init_callback_with_options(failing_sink, Pointer(Void).null, pointerof(options), pointerof(writer)).should eq(LibPftrace::Status::Ok)
+    begin
+      LibPftrace.write_process_track_descriptor(writer, 1, 1, "callback").should eq(LibPftrace::Status::IoError)
+      LibPftrace.writer_status(writer).should eq(LibPftrace::Status::IoError)
+      LibPftrace.flush(writer).should eq(LibPftrace::Status::IoError)
+    ensure
+      LibPftrace.destroy(writer).should eq(LibPftrace::Status::IoError)
+    end
   end
 end

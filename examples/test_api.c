@@ -1,67 +1,48 @@
 #include "pftrace.h"
 #include <stdio.h>
-#include <string.h>
 
-// Simple test to generate a valid trace packet
-// We will manually construct a packet with a timestamp and some interned data.
-// Field IDs:
-// TracePacket:
-//  timestamp = 8
-//  trusted_packet_sequence_id = 10
-//  interned_data = 12
-// InternedData:
-//  event_categories = 1 (EventCategory)
-// EventCategory:
-//  iid = 1
-//  name = 2
+struct memory_sink { size_t calls; size_t bytes; };
 
-int main() {
-  printf("Creating trace...\n");
-  PerfettoWriter *w = pftrace_create("test.pftrace", 12);
-  if (!w) {
-    printf("Failed to create writer\n");
+static pftrace_status_t write_memory(void *context, const uint8_t *bytes,
+                                     size_t size) {
+  struct memory_sink *sink = context;
+  if (size != 0 && bytes == NULL) return PFTRACE_INVALID_ARGUMENT;
+  sink->calls++;
+  sink->bytes += size;
+  return PFTRACE_OK;
+}
+
+static int check(pftrace_status_t status, const char *operation) {
+  if (status == PFTRACE_OK) return 0;
+  fprintf(stderr, "%s: %s\n", operation, pftrace_status_string(status));
+  return 1;
+}
+
+int main(void) {
+  pftrace_writer_options_t options;
+  pftrace_writer_t *writer = NULL;
+  struct memory_sink sink = {0};
+  const pftrace_event_common_t common = {
+      .timestamp_ns = 1000,
+      .timestamp_clock_id = PFTRACE_CLOCK_ID_CUSTOM_FIRST,
+      .trusted_packet_sequence_id = 42,
+      .track_uuid = 101,
+  };
+  const pftrace_string_t name = { .data = "callback event", .size = 14 };
+
+  if (check(pftrace_writer_options_init(&options), "options init")) return 1;
+  options.packet_scratch_capacity = 256;
+  options.output_batch_capacity = 256; /* Multiple complete packets batch. */
+  options.maximum_packet_bytes = 256;
+  if (check(pftrace_init_callback_with_options(write_memory, &sink, &options,
+                                               &writer), "callback init")) return 1;
+  if (check(pftrace_write_instant(writer, &common, name), "write direct event") ||
+      check(pftrace_flush(writer), "flush") ||
+      check(pftrace_finalize(writer), "finalize") ||
+      check(pftrace_destroy(writer), "destroy")) return 1;
+  if (sink.calls == 0 || sink.bytes == 0) {
+    fprintf(stderr, "callback did not receive trace bytes\n");
     return 1;
   }
-
-  // Packet 1: Metadata / Interned Data
-  size_t packet1 = pftrace_begin_packet(w);
-
-  pftrace_write_u64(w, 8, 1000); // timestamp = 1000 ns
-  pftrace_write_u64(w, 10, 42);  // trusted_packet_sequence_id = 42
-
-  // interned_data
-  size_t interned = pftrace_begin_nested(w, 12);
-
-  // event_categories
-  size_t cat = pftrace_begin_nested(w, 1);
-  pftrace_write_u64(w, 1, 1); // iid = 1
-  pftrace_write_string(w, 2, "benchmark", 9);
-  pftrace_end_nested(w, cat);
-
-  pftrace_end_nested(w, interned);
-  pftrace_end_packet(w, packet1);
-
-  // Packet 2: Actual Event
-  size_t packet2 = pftrace_begin_packet(w);
-  pftrace_write_u64(w, 8, 2000); // timestamp = 2000 ns
-  pftrace_write_u64(w, 10, 42);  // same sequence
-
-  // TrackEvent (ID 11)
-  size_t track_event = pftrace_begin_nested(w, 11);
-
-  // type = 1 (SLICE_BEGIN)
-  pftrace_write_u64(w, 9, 1);
-
-  // categories (interned ID) = 1
-  // Field 22 is categories (repeated uint64 for interned id)
-  pftrace_write_u64(w, 22, 1);
-
-  pftrace_end_nested(w, track_event);
-  pftrace_end_packet(w, packet2);
-
-  pftrace_flush(w);
-  pftrace_destroy(w);
-
-  printf("Trace written to test.pftrace\n");
   return 0;
 }

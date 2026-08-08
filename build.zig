@@ -105,8 +105,35 @@ pub fn build(b: *std.Build) void {
     const cpp_abi_step = b.step("test-cpp-abi", "Build and run the C++ public ABI test");
     cpp_abi_step.dependOn(&run_cpp_abi_test.step);
 
+    const example_names = [_][]const u8{
+        "test_api",
+        "test_high_level",
+        "test_flow",
+        "test_big_trace",
+    };
+    const examples_step = b.step("test-examples", "Build and run maintained C examples");
+    for (example_names) |name| {
+        const source = b.fmt("examples/{s}.c", .{name});
+        const example = b.addExecutable(.{
+            .name = b.fmt("pftrace-example-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        example.root_module.addCSourceFiles(.{
+            .files = &.{source},
+            .flags = &.{ "-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+        });
+        example.root_module.addIncludePath(b.path("include"));
+        example.root_module.linkLibrary(lib);
+        examples_step.dependOn(&b.addRunArtifact(example).step);
+    }
+
     const test_step = b.step("test", "Run all unit and public ABI tests");
     test_step.dependOn(zig_tests_step);
     test_step.dependOn(c_abi_step);
     test_step.dependOn(cpp_abi_step);
+    test_step.dependOn(examples_step);
 }

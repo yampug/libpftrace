@@ -2,7 +2,7 @@ require "spec"
 require "../src/pftrace"
 
 describe Pftrace do
-  it "RAISES on Use-After-Free (Event escape)" do
+  it "raises typed invalid-state error for invalidated event handle" do
     filename = "security_test.pftrace"
     escaped_ev : Pftrace::Event? = nil
 
@@ -13,16 +13,11 @@ describe Pftrace do
       end
     end
 
-    # At this point, the stack event is closed/destroyed in C.
-    # AND the Crystal wrapper has been invalidated.
-    # Accessing it should raise a Crystal Exception.
-    
     if ev = escaped_ev
-      puts "\n[TEST] Attempting UAF from Crystal..."
-      expect_raises(Exception, "Use-After-Free detected") do
+      error = expect_raises(Pftrace::Error) do
         ev.arg("outside", "dangerous") 
       end
-      puts "[TEST] Successfully caught UAF!"
+      error.status.should eq(LibPftrace::Status::InvalidState)
     end
     
     File.exists?(filename).should be_true
