@@ -32,6 +32,94 @@ pub fn build(b: *std.Build) void {
     // Keep redistribution terms alongside installed library artifacts.
     b.installFile("LICENSE", "LICENSE");
 
+    // Release ABI gates compile the installed public header without attempting
+    // to run target binaries. Runtime coverage stays on native test hosts.
+    const linux_aarch64 = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .linux,
+        .abi = .gnu,
+    });
+    const macos_aarch64 = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .macos,
+    });
+
+    const linux_aarch64_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "pftrace-linux-aarch64",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = linux_aarch64,
+            .optimize = optimize,
+            .pic = true,
+        }),
+    });
+    const macos_aarch64_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "pftrace-macos-aarch64",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = macos_aarch64,
+            .optimize = optimize,
+            .pic = true,
+        }),
+    });
+
+    const linux_aarch64_layout = b.addObject(.{
+        .name = "pftrace-public-layout-linux-aarch64",
+        .root_module = b.createModule(.{
+            .target = linux_aarch64,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    linux_aarch64_layout.root_module.addCSourceFiles(.{
+        .files = &.{"tests/abi/public_layout.c"},
+        .flags = &.{ "-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+    });
+    linux_aarch64_layout.root_module.addIncludePath(b.path("include"));
+
+    const macos_aarch64_layout = b.addObject(.{
+        .name = "pftrace-public-layout-macos-aarch64",
+        .root_module = b.createModule(.{
+            .target = macos_aarch64,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    macos_aarch64_layout.root_module.addCSourceFiles(.{
+        .files = &.{"tests/abi/public_layout.c"},
+        .flags = &.{ "-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+    });
+    macos_aarch64_layout.root_module.addIncludePath(b.path("include"));
+
+    const linux_aarch64_step = b.step("check-linux-aarch64", "Compile library and public header for Linux aarch64 (no runtime test)");
+    linux_aarch64_step.dependOn(&linux_aarch64_lib.step);
+    linux_aarch64_step.dependOn(&linux_aarch64_layout.step);
+    const macos_aarch64_step = b.step("check-macos-aarch64", "Compile library and public header for macOS arm64 (no runtime test)");
+    macos_aarch64_step.dependOn(&macos_aarch64_lib.step);
+    macos_aarch64_step.dependOn(&macos_aarch64_layout.step);
+
+    const native_layout = b.addObject(.{
+        .name = "pftrace-public-layout-native",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    native_layout.root_module.addCSourceFiles(.{
+        .files = &.{"tests/abi/public_layout.c"},
+        .flags = &.{ "-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+    });
+    native_layout.root_module.addIncludePath(b.path("include"));
+    const exported_symbols = b.addSystemCommand(&.{ "sh", "tests/abi/check-symbols.sh" });
+    exported_symbols.addFileArg(lib.getEmittedBin());
+    exported_symbols.addFileArg(b.path("tests/abi/expected_symbols.txt"));
+    const abi_step = b.step("test-abi", "Check exported symbols and public C ABI layout");
+    abi_step.dependOn(&native_layout.step);
+    abi_step.dependOn(&exported_symbols.step);
+
     const proto_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/proto.zig"),
@@ -186,4 +274,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(writer_failure_step);
     test_step.dependOn(cpp_abi_step);
     test_step.dependOn(examples_step);
+    test_step.dependOn(abi_step);
 }
