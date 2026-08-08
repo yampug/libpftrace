@@ -4,8 +4,14 @@ set -eu
 for path in \
     LICENSE \
     README.md \
+    CHANGELOG.md \
     build.zig \
     build.zig.zon \
+    bindings/crystal/README.md \
+    bindings/crystal/shard.yml \
+    bindings/crystal/src/lib_pftrace.cr \
+    bindings/crystal/src/pftrace.cr \
+    examples/test_api.c \
     include/pftrace.h \
     src/main.zig \
     src/proto.zig \
@@ -26,18 +32,15 @@ then
     exit 1
 fi
 
-# Keep public claims aligned with current implementation until bounded writer work
-# lands. This is intentionally a documentation check: the public header is the C
-# ABI contract and README is the user-facing contract.
+# Keep release package and final public contract aligned. Public header is C ABI
+# contract; README is user-facing contract.
 for required in \
-    'Current allocation and I/O behavior' \
-    'exclusive ownership by one thread at a time' \
-    'Independent writers may be used concurrently' \
-    'their own drain thread' \
-    'no worker thread' \
-    'exclusive single-thread ownership' \
-    'Packet and track-event handles belong to the writer that created them' \
-    'must have stopped before lifecycle'
+    'Successful initialization allocates' \
+    'Each writer has one exclusive owning thread' \
+    'automatic sink writes' \
+    'sticky `PFTRACE_IO_ERROR`' \
+    'PFTRACE_CLOCK_ID_LINUX_BOOTTIME' \
+    'Builder migration'
 do
     if ! grep -Fq "$required" README.md include/pftrace.h; then
         printf 'missing public concurrency or behavior contract: %s\n' "$required" >&2

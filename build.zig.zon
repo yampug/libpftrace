@@ -6,8 +6,11 @@
     .paths = .{
         "LICENSE",
         "README.md",
+        "CHANGELOG.md",
         "build.zig",
         "build.zig.zon",
+        "bindings",
+        "examples",
         "include",
         "src",
         "tests",

@@ -12,6 +12,10 @@ pub fn build(b: *std.Build) void {
     const documentation_step = b.step("test-docs", "Compile README C snippets and check public API inventory");
     documentation_step.dependOn(&documentation_check.step);
 
+    const release_validation = b.addSystemCommand(&.{ "sh", "tools/release-validate.sh" });
+    const release_validation_step = b.step("release-validate", "Build and validate clean source archive (requires Zig 0.15.0 and Perfetto)");
+    release_validation_step.dependOn(&release_validation.step);
+
     // Create the root module
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
