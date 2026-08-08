@@ -13,6 +13,7 @@ const MAGIC_DEAD = 0xDEADBEEF;
 
 pub const pftrace_writer_t = struct {
     pb: proto.PbWriter,
+    pb_storage: []u8,
     file_path: []u8,
     file: std.fs.File,
 
@@ -20,8 +21,9 @@ pub const pftrace_writer_t = struct {
         const ptr = try allocator.create(pftrace_writer_t);
         errdefer allocator.destroy(ptr);
 
-        ptr.pb = proto.PbWriter.init(allocator);
-        errdefer ptr.pb.deinit();
+        ptr.pb_storage = try allocator.alloc(u8, 1024 * 1024);
+        errdefer allocator.free(ptr.pb_storage);
+        ptr.pb = proto.PbWriter.init(ptr.pb_storage);
 
         ptr.file_path = try allocator.dupe(u8, path);
         errdefer allocator.free(ptr.file_path);
@@ -35,13 +37,13 @@ pub const pftrace_writer_t = struct {
         self.flush() catch {};
         self.file.close();
         allocator.free(self.file_path);
-        self.pb.deinit();
+        allocator.free(self.pb_storage);
         allocator.destroy(self);
     }
 
     pub fn flush(self: *pftrace_writer_t) !void {
-        if (self.pb.buffer.items.len > 0) {
-            self.file.writeAll(self.pb.buffer.items) catch |err| {
+        if (self.pb.written().len > 0) {
+            self.file.writeAll(self.pb.written()) catch |err| {
                 std.debug.print("libpftrace: failed to flush trace data: {}\n", .{err});
                 return err;
             };
