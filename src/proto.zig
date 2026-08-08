@@ -207,6 +207,13 @@ pub const PbWriter = struct {
         try self.writeString(field_id, value);
     }
 
+    /// Append already-encoded protobuf bytes. Used only to atomically move a
+    /// completed packet from writer-owned scratch into committed output.
+    pub fn appendEncoded(self: *PbWriter, value: []const u8) Error!void {
+        const destination = try self.reserve(value.len);
+        @memcpy(destination, value);
+    }
+
     /// Compatibility field writer. Signed values are sign-extended before bitcast.
     pub fn writeInt(self: *PbWriter, field_id: u32, value: anytype) Error!void {
         const T = @TypeOf(value);
