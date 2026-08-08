@@ -9,7 +9,9 @@ for path in \
     include/pftrace.h \
     src/main.zig \
     src/proto.zig \
-    src/schema.zig
+    src/schema.zig \
+    tests/c_abi.c \
+    tests/cpp_abi.cpp
 do
     if [ ! -f "$path" ]; then
         printf 'missing package path: %s\n' "$path" >&2

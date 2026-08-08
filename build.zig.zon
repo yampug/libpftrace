@@ -10,6 +10,7 @@
         "build.zig.zon",
         "include",
         "src",
+        "tests",
         "tools",
     },
 }

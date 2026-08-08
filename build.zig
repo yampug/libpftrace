@@ -31,4 +31,67 @@ pub fn build(b: *std.Build) void {
 
     // Keep redistribution terms alongside installed library artifacts.
     b.installFile("LICENSE", "LICENSE");
+
+    const proto_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/proto.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const library_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_proto_tests = b.addRunArtifact(proto_tests);
+    const run_library_tests = b.addRunArtifact(library_tests);
+    const zig_tests_step = b.step("test-zig", "Run Zig encoder and library unit tests");
+    zig_tests_step.dependOn(&run_proto_tests.step);
+    zig_tests_step.dependOn(&run_library_tests.step);
+
+    const c_abi_test = b.addExecutable(.{
+        .name = "pftrace-c-abi-test",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    c_abi_test.root_module.addCSourceFiles(.{
+        .files = &.{"tests/c_abi.c"},
+        .flags = &.{ "-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+    });
+    c_abi_test.root_module.addIncludePath(b.path("include"));
+    c_abi_test.root_module.linkLibrary(lib);
+    const run_c_abi_test = b.addRunArtifact(c_abi_test);
+    const c_abi_step = b.step("test-c-abi", "Build and run the C public ABI test");
+    c_abi_step.dependOn(&run_c_abi_test.step);
+
+    const cpp_abi_test = b.addExecutable(.{
+        .name = "pftrace-cpp-abi-test",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        }),
+    });
+    cpp_abi_test.root_module.addCSourceFiles(.{
+        .files = &.{"tests/cpp_abi.cpp"},
+        .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+    });
+    cpp_abi_test.root_module.addIncludePath(b.path("include"));
+    cpp_abi_test.root_module.linkLibrary(lib);
+    const run_cpp_abi_test = b.addRunArtifact(cpp_abi_test);
+    const cpp_abi_step = b.step("test-cpp-abi", "Build and run the C++ public ABI test");
+    cpp_abi_step.dependOn(&run_cpp_abi_test.step);
+
+    const test_step = b.step("test", "Run all unit and public ABI tests");
+    test_step.dependOn(zig_tests_step);
+    test_step.dependOn(c_abi_step);
+    test_step.dependOn(cpp_abi_step);
 }
